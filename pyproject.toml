@@ -1,0 +1,21 @@
+[project]
+name = "kali-mcp"
+version = "1.0.0"
+description = "MCP server exposing Kali Linux network tools for AI-powered network maintenance"
+requires-python = ">=3.10"
+dependencies = [
+    "fastmcp>=3.0.0",
+    "pydantic>=2.0.0",
+    "uvicorn>=0.30.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+kali-mcp = "kali_mcp.server:main"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
