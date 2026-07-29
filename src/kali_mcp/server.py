@@ -151,6 +151,25 @@ else:
         "Pentest tools: disabled (set PENTEST_ENABLED=true in .env to enable)"
     )
 
+# Conditionally register attack tools
+_attack_enabled = os.getenv("ATTACK_ENABLED", "").lower() in ("true", "1", "yes")
+if _attack_enabled:
+    try:
+        from kali_mcp.pentest import ATTACK_TOOLS
+
+        for _name, (_func, _model) in ATTACK_TOOLS.items():
+            _register_tool_with_model(_name, _func, _model)
+            logger.info("Registered attack tool: %s", _name)
+
+        logger.info("Attack tools: %d registered (ATTACK_ENABLED=%s)",
+                     len(ATTACK_TOOLS), os.getenv("ATTACK_ENABLED"))
+    except ImportError as e:
+        logger.warning("Attack module import failed: %s", e)
+else:
+    logger.info(
+        "Attack tools: disabled (set ATTACK_ENABLED=true in .env to enable)"
+    )
+
 
 # ---------------------------------------------------------------------------
 # CLI
