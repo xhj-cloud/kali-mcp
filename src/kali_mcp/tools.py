@@ -913,6 +913,281 @@ async def network_topology(params: TopologyInput) -> str:
 
 
 # ===================================================================
+# SNMP Topology — precise switch-level mapping
+# ===================================================================
+
+
+class SnmpTopologyInput(BaseModel):
+    """Input for SNMP-based topology mapping."""
+
+    subnet: str = Field(
+        default="",
+        description="Subnet CIDR (e.g. '192.168.0.0/24'). Empty = auto-detect.",
+        max_length=32,
+    )
+    switches: str = Field(
+        default="",
+        description="Comma-separated switch IPs to query via SNMP (e.g. '192.168.0.1,192.168.0.9'). Empty = scan common IPs.",
+        max_length=256,
+    )
+    community: str = Field(
+        default="public",
+        description="SNMP community string. Default: public.",
+        max_length=64,
+    )
+
+    @field_validator("subnet")
+    @classmethod
+    def validate_subnet(cls, v: str) -> str:
+        if v:
+            _no_shell_meta(v)
+        return v
+
+
+async def snmp_topology(params: SnmpTopologyInput) -> str:
+    """Precise network topology via SNMP (falls back to ARP if SNMP unavailable).
+
+    Attempts SNMP to read switch MAC-address tables, mapping each device
+    to its exact switch port. Generates a Mermaid diagram with port-level
+    accuracy.
+
+    If SNMP is unavailable (unmanaged switches), falls back to ARP-based
+    topology with best-effort device classification.
+
+    Requires: snmpwalk (sudo apt install snmp), arp-scan
+    """
+    import re
+    from collections import defaultdict
+
+    executor = get_executor(timeout=60)
+
+    # 1. Auto-detect subnet
+    subnet = params.subnet
+    if not subnet:
+        r = await executor.run(["ip", "route", "show", "default"])
+        m = re.search(r"dev\s+(\S+)", r.stdout)
+        iface = m.group(1) if m else "eth0"
+        r2 = await executor.run(["ip", "-4", "addr", "show", iface])
+        m2 = re.search(r"inet\s+(\S+)", r2.stdout)
+        if m2:
+            try:
+                net = ipaddress.IPv4Network(m2.group(1), strict=False)
+                subnet = str(net)
+            except Exception:
+                subnet = "192.168.0.0/24"
+
+    # 2. ARP scan for all devices
+    arp_result = await executor.run(["arp-scan", subnet], timeout=60)
+    arp_devices = []  # [(ip, mac, vendor)]
+    if arp_result.success:
+        for line in arp_result.stdout.split("\n"):
+            parts = line.strip().split("\t")
+            if len(parts) >= 2 and re.match(r"\d+\.\d+\.\d+\.\d+$", parts[0]):
+                ip = parts[0].strip()
+                mac = parts[1].strip().upper() if len(parts) > 1 else ""
+                vendor = parts[2].strip() if len(parts) > 2 else "Unknown"
+                arp_devices.append((ip, mac, vendor))
+
+    # 3. Find switches to query
+    switch_ips = []
+    if params.switches:
+        switch_ips = [s.strip() for s in params.switches.split(",") if s.strip()]
+    else:
+        # Try all TP-Link, H3C, or .1 addresses
+        for ip, mac, vendor in arp_devices:
+            vl = vendor.lower()
+            if any(k in vl for k in ["tp-link", "h3c", "cisco", "aruba", "switch", "ubiquit"]):
+                switch_ips.append(ip)
+        if not switch_ips:
+            # Fallback: try common gateway IPs
+            parts = subnet.split(".")[0:3]
+            for last in ["1", "254"]:
+                switch_ips.append(".".join(parts + [last]))
+
+    # 4. Try SNMP on each switch
+    snmp_data = {}  # {switch_ip: {mac: port_name}}
+    snmp_working = False
+
+    for sw_ip in switch_ips[:5]:  # Limit to 5 switches
+        # Test SNMP reachability
+        test = await executor.run(
+            ["snmpwalk", "-v2c", "-c", params.community, "-t", "3", "-r", "1",
+             sw_ip, "1.3.6.1.2.1.1.5.0"],
+            timeout=10,
+        )
+        if not test.success or "No Such Object" in test.stdout or "Timeout" in test.stderr:
+            continue
+
+        snmp_working = True
+        mac_to_port = {}
+
+        # Query dot1d MAC table: OID .1.3.6.1.2.1.17.4.3.1.2 = dot1dTpFdbPort
+        # Format: .1.3.6.1.2.1.17.4.3.1.2.<vlan>.<mac_decimal> = port
+        mac_walk = await executor.run(
+            ["snmpwalk", "-v2c", "-c", params.community, "-t", "5", "-r", "1",
+             sw_ip, "1.3.6.1.2.1.17.4.3.1.2"],
+            timeout=20,
+        )
+
+        if mac_walk.success:
+            for line in mac_walk.stdout.split("\n"):
+                m = re.search(
+                    r"\.1\.3\.6\.1\.2\.1\.17\.4\.3\.1\.2\.(\d+)\.(\d+)\.(\d+)\.(\d+)\.(\d+)\.(\d+)\s*=\s*(\d+)",
+                    line,
+                )
+                if m:
+                    mac_hex = ":".join(f"{int(m.group(i)):02X}" for i in range(2, 8))
+                    port_num = int(m.group(8))
+                    mac_to_port[mac_hex] = f"Port {port_num}"
+
+        # Query interface names: IF-MIB::ifName
+        port_names = {}
+        iface_walk = await executor.run(
+            ["snmpwalk", "-v2c", "-c", params.community, "-t", "3", "-r", "1",
+             sw_ip, "1.3.6.1.2.1.31.1.1.1.1"],
+            timeout=10,
+        )
+        if iface_walk.success:
+            for line in iface_walk.stdout.split("\n"):
+                m = re.search(r"\.1\.3\.6\.1\.2\.1\.31\.1\.1\.1\.1\.(\d+)\s*=\s*STRING:\s*(.+)", line)
+                if m:
+                    port_names[int(m.group(1))] = m.group(2).strip()
+
+        # Query switch hostname
+        hostname = sw_ip
+        host_walk = await executor.run(
+            ["snmpwalk", "-v2c", "-c", params.community, "-t", "3", "-r", "1",
+             sw_ip, "1.3.6.1.2.1.1.5.0"],
+            timeout=5,
+        )
+        if host_walk.success:
+            hm = re.search(r'STRING:\s*"?(.+?)"?\s*$', host_walk.stdout)
+            if hm:
+                hostname = hm.group(1)
+
+        snmp_data[sw_ip] = {
+            "hostname": hostname,
+            "mac_to_port": mac_to_port,
+            "port_names": port_names,
+        }
+
+    # 5. Build output
+    lines = []
+
+    if snmp_working:
+        lines.append(f"## 🎯 SNMP 精确拓扑 — {subnet}")
+        lines.append("")
+        lines.append("```mermaid")
+        lines.append("graph TD")
+        lines.append('    internet(("🌍 Internet"))')
+
+        # Map ARP devices to switch ports
+        switch_devices = defaultdict(list)
+        unmapped_ips = set(ip for ip, _, _ in arp_devices)
+        unmapped_ips.discard(subnet.rsplit(".", 1)[0] + ".1")
+
+        for ip, mac, vendor in arp_devices:
+            for sw_ip, sdata in snmp_data.items():
+                if mac and mac in sdata["mac_to_port"]:
+                    port = sdata["mac_to_port"][mac]
+                    if mac in sdata["port_names"]:
+                        port = f"{port} ({sdata['port_names'][mac]})"
+                    switch_devices[sw_ip].append((ip, mac, vendor, port))
+                    unmapped_ips.discard(ip)
+                    break
+
+        # Draw gateway
+        gw_ip = subnet.rsplit(".", 1)[0] + ".1"
+        gw_vendor = ""
+        for ip, mac, vendor in arp_devices:
+            if ip == gw_ip:
+                gw_vendor = vendor[:15] if vendor else ""
+                break
+        lines.append(f'    internet --- gw["🏠 网关\\n{gw_ip}"]')
+
+        # Draw each switch with its ports and devices
+        for sw_ip, sdata in snmp_data.items():
+            sw_id = f'sw_{sw_ip.replace(".","_")}'
+            hn = sdata["hostname"][:15]
+            port_count = len(sdata["mac_to_port"])
+            lines.append(f'    gw --- {sw_id}["🔀 {hn}\\n{sw_ip}\\n{port_count} devices"]')
+
+            devices = switch_devices.get(sw_ip, [])
+            for i, (ip, mac, vendor, port) in enumerate(devices):
+                dev_id = f'd_{ip.replace(".","_")}'
+                icon = _classify_device(vendor)[1]
+                label = f'{icon} {vendor[:12] if vendor[:3] != "(Un" else "设备"}\\n{ip}\\n{port}'
+                lines.append(f'    {sw_id} --- {dev_id}["{label}"]')
+
+        # Draw unmapped devices under gateway
+        if unmapped_ips:
+            lines.append(f'    gw --- unmapped["❓ 未映射\\n{len(unmapped_ips)} devices"]')
+
+        lines.append("```")
+        lines.append("")
+
+        # Summary table
+        lines.append("### SNMP 交换机详情")
+        for sw_ip, sdata in snmp_data.items():
+            lines.append(f"\n**{sdata['hostname']}** ({sw_ip})")
+            lines.append(f"| MAC | IP | 端口 | 厂商 |")
+            lines.append(f"|------|------|------|------|")
+            for ip, mac, vendor, port in switch_devices.get(sw_ip, []):
+                lines.append(f"| {mac} | {ip} | {port} | {vendor[:25]} |")
+
+        if unmapped_ips:
+            lines.append(f"\n⚠️ {len(unmapped_ips)} 台设备未匹配到任何 SNMP 交换机端口（可能是通过傻瓜交换机连接的）。")
+
+    else:
+        # SNMP failed — fall back to ARP topology
+        lines.append(f"## 🌐 网络拓扑 — {subnet}（SNMP 不可用，ARP 推测）")
+        lines.append("")
+        lines.append("> ⚠️ 未检测到 SNMP。显示 ARP 推测拓扑。精确映射需要交换机开启 SNMP v2c。")
+        lines.append("")
+
+        for sw_ip in switch_ips:
+            lines.append(f"- `{sw_ip}`: SNMP 无响应")
+        lines.append("")
+
+        # Reuse ARP topology code
+        devices = []
+        for ip, mac, vendor in arp_devices:
+            dclass, icon = _classify_device(vendor)
+            if ip.endswith(".1"):
+                dclass, icon = "gateway", "🏠"
+            devices.append({"ip": ip, "mac": mac, "vendor": vendor, "class": dclass, "icon": icon})
+
+        lines.append("```mermaid")
+        lines.append("graph TD")
+        lines.append('    internet(("🌍 Internet"))')
+        gw_id = "gw"
+        for d in devices:
+            if d["class"] == "gateway":
+                lines.append(f'    internet --- {gw_id}["🏠 网关\\n{d["ip"]}"]')
+                break
+
+        for d in devices:
+            if d["class"] not in ("gateway",):
+                did = f'd_{d["ip"].replace(".","_")}'
+                lines.append(f'    {gw_id} --- {did}["{d["icon"]} {d["vendor"][:12]}\\n{d["ip"]}"]')
+
+        lines.append("```")
+
+        # Stats
+        from collections import Counter
+        stats = Counter(d["class"] for d in devices)
+        lines.append("")
+        lines.append("### 设备分布")
+        lines.append("| 类别 | 数量 |")
+        lines.append("|------|------|")
+        for cls, cnt in stats.most_common():
+            icon = next((d["icon"] for d in devices if d["class"] == cls), "?")
+            lines.append(f"| {icon} {cls} | {cnt} |")
+
+    return "\n".join(lines)
+
+
+# ===================================================================
 # Registry — maps tool names to (async_function, PydanticModel)
 # ===================================================================
 
@@ -930,4 +1205,5 @@ TOOL_REGISTRY: dict[str, tuple[callable, type[BaseModel]]] = {
     "tcpdump_capture": (tcpdump_capture, TcpdumpInput),
     "http_request": (http_request, CurlInput),
     "network_topology": (network_topology, TopologyInput),
+    "snmp_topology": (snmp_topology, SnmpTopologyInput),
 }
