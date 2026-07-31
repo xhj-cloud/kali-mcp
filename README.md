@@ -1,11 +1,11 @@
 # 🔍 Kali MCP Server
 
-> 将 Kali Linux 变成你的 AI 网络助手 —— 27 个工具，从日常维护到渗透测试，对话即操作。
+> 将 Kali Linux 变成你的 AI 网络助手 —— 32 个工具，从网络维护到渗透攻击，对话即操作。
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
 [![FastMCP](https://img.shields.io/badge/FastMCP-3.4+-green.svg)](https://gofastmcp.com)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tools](https://img.shields.io/badge/Tools-27-orange.svg)]()
+[![Tools](https://img.shields.io/badge/Tools-32-orange.svg)]()
 
 ---
 
@@ -25,7 +25,7 @@
 
 在 Cherry Studio / Claude Desktop 对话中直接：
 
-### 🟢 网络维护（12 工具，默认）
+### 🟢 网络维护（14 工具，默认）
 
 | 场景 | 对话示例 |
 |------|----------|
@@ -54,18 +54,20 @@
 | 漏洞搜索 | "searchsploit 搜一下 OpenSSH 7.0 的漏洞" |
 | 密码爆破 | "用 rockyou 字典爆破 192.168.0.x 的 SSH" |
 
-### 🔴 主动攻击（8 工具，额外 `ATTACK_ENABLED=true`）
+### 🔴 主动攻击（11 工具，额外 `ATTACK_ENABLED=true`）
 
 | 场景 | 对话示例 |
 |------|----------|
 | SQL 注入 | "检测 http://target/page.php?id=1 是否有 SQL 注入" |
 | WordPress | "扫描 https://blog.example.com 的 WP 漏洞和用户" |
 | Payload 生成 | "生成 Windows x64 reverse shell payload" |
-| 网络连接 | "nc 连接到 192.168.0.13 的 22 端口" |
+| TCP 工具 | "nc 连接到 192.168.0.13 的 22 端口" |
 | 哈希捕获 | "用 Responder 在 eth0 上捕获 30 秒 NTLM 哈希" |
 | AD 攻击 | "crackmapexec 检查域内 SMB 访问权限" |
 | WiFi 扫描 | "airodump-ng 扫描附近 WiFi 网络 30 秒" |
 | 哈希破解 | "john 破解捕获的 NTLM 哈希（60 秒）" |
+| ARP 踢人 | "把 192.168.0.97 踢下线" / "恢复它的网络" |
+| DHCP 泛洪 | "耗尽路由器 IP 池，新设备无法连 WiFi" |
 
 ---
 
@@ -76,9 +78,9 @@
 │  Cherry Studio    │ ────── :8000/mcp ──────────→ │  Kali MCP Server         │
 │  Claude Desktop   │                              │  (FastMCP 3.x)           │
 └──────────────────┘                              ├──────────────────────────┤
-                                                   │ 🟢 12 网络维护 (默认)    │
+                                                   │ 🟢 14 网络维护 (默认)    │
                                                    │ 🟡 7 渗透侦察 (可开关)   │
-                                                   │ 🔴 8 主动攻击 (可开关)   │
+                                                   │ 🔴 11 主动攻击 (可开关)   │
                                                    └──────────────────────────┘
 ```
 
@@ -173,6 +175,11 @@ Cherry Studio → 设置 → MCP 服务器 → 添加：
 | 25 | `crackmapexec_run` | crackmapexec | 🔴 | SMB/WinRM/MSSQL 攻击 |
 | 26 | `airodump_scan` | airodump-ng | 🔴 | WiFi 扫描 + 握手包捕获 |
 | 27 | `john_crack` | john | 🔴 | 密码哈希离线破解 |
+| 28 | `network_topology` | arp-scan | 🟢 | ARP 网络拓扑图（Mermaid） |
+| 29 | `snmp_topology` | snmpwalk/arp-scan | 🟢 | SNMP 精确拓扑（回退 ARP） |
+| 30 | `arpspoof_disconnect` | arpspoof | 🔴 | ARP 欺骗永久踢人下线 |
+| 31 | `arpspoof_stop` | kill | 🔴 | 恢复被踢设备网络 |
+| 32 | `dhcp_flood` | yersinia | 🔴 | DHCP 泛洪耗尽 IP 池 |
 
 ---
 
