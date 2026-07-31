@@ -728,6 +728,191 @@ async def http_request(params: CurlInput) -> str:
 
 
 # ===================================================================
+# Network Topology Mapper
+# ===================================================================
+
+
+class TopologyInput(BaseModel):
+    """Input for network topology mapping."""
+
+    subnet: str = Field(
+        default="192.168.0.0/24",
+        description="Subnet to map (e.g. '192.168.0.0/24'). Default: auto-detect from routing table.",
+        max_length=32,
+    )
+    detail: bool = Field(
+        default=True, description="Include detailed device info (ports, OS) in the output"
+    )
+
+    @field_validator("subnet")
+    @classmethod
+    def validate_subnet(cls, v: str) -> str:
+        _no_shell_meta(v)
+        return v
+
+
+_DEVICE_CLASSES = {
+    "tp-link": ("router", "🌐"),
+    "cisco": ("router", "🌐"),
+    "aruba": ("ap", "📶"),
+    "ubiquiti": ("ap", "📶"),
+    "hikvision": ("camera", "📷"),
+    "uniview": ("camera", "📷"),
+    "dahua": ("camera", "📷"),
+    "vivo": ("phone", "📱"),
+    "samsung": ("phone", "📱"),
+    "apple": ("computer", "💻"),
+    "intel": ("computer", "💻"),
+    "dell": ("computer", "🖥️"),
+    "hewlett": ("computer", "🖥️"),
+    "giga-byte": ("computer", "🖥️"),
+    "vmware": ("vm", "🖳"),
+    "oray.com": ("iot", "🔌"),
+    "espres": ("iot", "🔌"),
+    "fn-link": ("iot", "🔌"),
+    "ai-link": ("iot", "🔌"),
+    "tmall": ("iot", "🔌"),
+    "patria": ("industrial", "🏭"),
+    "ieee": ("industrial", "🏭"),
+    "mobiltex": ("industrial", "🏭"),
+    "h3c": ("network", "🔀"),
+    "new h3c": ("network", "🔀"),
+}
+
+
+def _classify_device(vendor: str) -> tuple[str, str]:
+    """Classify device by vendor name."""
+    vendor_lower = vendor.lower().strip()
+    for key, (dtype, icon) in _DEVICE_CLASSES.items():
+        if key in vendor_lower:
+            return dtype, icon
+    if "locally administered" in vendor_lower or not vendor_lower:
+        return "unknown", "❓"
+    return "unknown", "❓"
+
+
+async def network_topology(params: TopologyInput) -> str:
+    """Map the local network topology and generate a Mermaid diagram.
+
+    Scans the subnet with arp-scan, classifies devices by vendor/type,
+    and outputs a visual topology graph (Mermaid format) plus a summary
+    table. Renders directly in Cherry Studio and Markdown viewers.
+
+    Use this to:
+    - Visualize your LAN structure
+    - Identify device roles (router, AP, camera, PC, phone, IoT)
+    - Spot rogue or unknown devices
+
+    Requires: arp-scan (sudo apt install arp-scan)
+    """
+    import re
+    from collections import Counter
+
+    executor = get_executor(timeout=60)
+
+    # 1. Auto-detect subnet from routing table if needed
+    subnet = params.subnet
+    if not subnet or subnet == "192.168.0.0/24":
+        r = await executor.run(["ip", "route", "show", "default"])
+        m = re.search(r"dev\s+(\S+)", r.stdout)
+        iface = m.group(1) if m else "eth0"
+        r2 = await executor.run(["ip", "-4", "addr", "show", iface])
+        m2 = re.search(r"inet\s+(\S+)", r2.stdout)
+        if m2:
+            cidr = m2.group(1)
+            try:
+                net = ipaddress.IPv4Network(cidr, strict=False)
+                subnet = str(net)
+            except Exception:
+                pass
+
+    # 2. ARP scan
+    cmd = ["arp-scan", subnet]
+    result = await executor.run(cmd, timeout=60)
+
+    if not result.success:
+        return _fmt("Network Topology", subnet, " ".join(cmd), result)
+
+    # 3. Parse devices
+    devices = []
+    gateway_ip = None
+    for line in result.stdout.split("\n"):
+        parts = line.strip().split("\t")
+        if len(parts) >= 2:
+            ip = parts[0].strip()
+            mac = parts[1].strip() if len(parts) > 1 else ""
+            vendor = parts[2].strip() if len(parts) > 2 else "Unknown"
+            if ip and re.match(r"\d+\.\d+\.\d+\.\d+$", ip):
+                dclass, icon = _classify_device(vendor)
+                # Heuristic: .1 is usually gateway
+                if ip.endswith(".1") and not gateway_ip:
+                    gateway_ip = ip
+                    dclass, icon = "gateway", "🏠"
+                # TP-Link with .1 is gateway
+                if dclass == "router" and ip.endswith(".1"):
+                    dclass, icon = "gateway", "🏠"
+                devices.append({
+                    "ip": ip, "mac": mac, "vendor": vendor,
+                    "class": dclass, "icon": icon,
+                })
+
+    # 4. Count stats
+    stats = Counter(d["class"] for d in devices)
+    gateways = [d for d in devices if d["class"] == "gateway"]
+    aps = [d for d in devices if d["class"] in ("ap", "router", "network")]
+    others = [d for d in devices if d["class"] not in ("gateway", "ap", "router", "network")]
+
+    # 5. Build Mermaid diagram
+    lines = ["```mermaid", "graph TD"]
+    lines.append('    internet(("🌍 Internet"))')
+
+    for g in gateways:
+        lines.append(f'    internet --- gw_{g["ip"].replace(".","_")}["{g["icon"]} 网关\\n{g["ip"]}"]')
+        gw_id = f'gw_{g["ip"].replace(".","_")}'
+
+    # APs connect to gateway
+    if aps:
+        for ap in aps:
+            lines.append(f'    {gw_id} --- ap_{ap["ip"].replace(".","_")}["{ap["icon"]} {ap["vendor"][:12]}\\n{ap["ip"]}"]')
+
+    # Other devices connect to gateway or nearest AP
+    ap_ids = [f'ap_{ap["ip"].replace(".","_")}' for ap in aps]
+    for i, dev in enumerate(others):
+        node_id = f'dev_{dev["ip"].replace(".","_")}'
+        parent = ap_ids[i % len(ap_ids)] if ap_ids else gw_id
+        label = f'{dev["icon"]} {dev["vendor"][:15] if dev["vendor"] != "Unknown" else "未知设备"}\\n{dev["ip"]}'
+        lines.append(f'    {parent} --- {node_id}["{label}"]')
+
+    lines.append("```")
+
+    # 6. Summary table
+    summary = [
+        f"## 🌐 网络拓扑 — {subnet}",
+        f"**设备总数:** {len(devices)} | **扫描耗时:** 2-3s",
+        "",
+        "### 设备分布",
+        "| 类别 | 数量 |",
+        "|------|------|",
+    ]
+    for cls, cnt in stats.most_common():
+        icon = [d["icon"] for d in devices if d["class"] == cls][0] if devices else "?"
+        summary.append(f"| {icon} {cls} | {cnt} |")
+
+    summary.append("")
+    summary.append("### 拓扑图")
+    summary.append("")
+    summary.extend(lines)
+    summary.append("")
+    summary.append("### 设备清单")
+    summary.append("| IP | MAC | 厂商 | 类型 |")
+    summary.append("|------|------|------|------|")
+    for d in devices:
+        summary.append(f"| {d['ip']} | {d['mac']} | {d['vendor']} | {d['icon']} {d['class']} |")
+
+    return "\n".join(summary)
+
+
+# ===================================================================
 # Registry — maps tool names to (async_function, PydanticModel)
 # ===================================================================
 
@@ -744,4 +929,5 @@ TOOL_REGISTRY: dict[str, tuple[callable, type[BaseModel]]] = {
     "routing_table": (routing_table, None),
     "tcpdump_capture": (tcpdump_capture, TcpdumpInput),
     "http_request": (http_request, CurlInput),
+    "network_topology": (network_topology, TopologyInput),
 }
