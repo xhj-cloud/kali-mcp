@@ -275,7 +275,7 @@ class TrafficStatsInput(BaseModel):
         le=300,
     )
     count: int = Field(
-        default=200,
+        default=100,
         description="Maximum packets to capture (reduced if duration expires first)",
         ge=50,
         le=10000,
@@ -308,6 +308,26 @@ class TrafficStatsInput(BaseModel):
         return v
 
 
+# Pre-compiled regex for parsing tcpdump -tt output
+# Format: unix_ts IP src_ip.src_port > dst_ip.dst_port: first_word [...], length N
+_PKT_RE = re.compile(
+    r"[\d.]+\s+IP\s+"
+    r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\.(\d+)?\s+>\s+"
+    r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\.(\d+)?:\s*"
+    r"(\S+)"
+)
+
+
+def _normalize_proto(first_word: str) -> str:
+    """Normalize the first word after ':' in tcpdump output to a protocol name."""
+    w = first_word.lower().rstrip(",")
+    if w == "flags":
+        return "TCP"
+    elif w in ("udp", "icmp", "igmp", "esp", "ah", "gre"):
+        return w.upper()
+    return "TCP"
+
+
 async def traffic_stats(params: TrafficStatsInput) -> str:
     """Capture live network traffic and analyze per-IP statistics.
 
@@ -328,7 +348,7 @@ async def traffic_stats(params: TrafficStatsInput) -> str:
     executor = get_executor(timeout=params.duration + 30)
     now = datetime.now(timezone.utc).astimezone().strftime("%H:%M:%S")
 
-    # 1. Capture packets with tcpdump (show source/dest IP, proto, port, length)
+    # 1. Capture packets
     cmd = [
         "tcpdump",
         "-i", params.interface,
@@ -342,8 +362,7 @@ async def traffic_stats(params: TrafficStatsInput) -> str:
     timeout = params.duration + 10
     result = await executor.run(cmd, timeout=timeout)
 
-    # 2. Parse capture output
-    # tcpdump -tt format: unix_ts IP src.port > dst.port: Flags [...], length N
+    # 2. Parse: extract IPs, ports, protocol, and packet length
     ip_counter: Counter = Counter()
     proto_counter: Counter = Counter()
     port_counter: Counter = Counter()
@@ -351,18 +370,13 @@ async def traffic_stats(params: TrafficStatsInput) -> str:
     packet_count = 0
 
     for line in result.stdout.split("\n"):
-        # Match: timestamp IP src.port > dst.port: proto, length N
-        # or: timestamp IP src > dst: proto, length N
-        m = re.match(
-            r"[\d.]+\s+IP\s+([\d.]+)(?:\.\d+)?\s+>\s+([\d.]+)(?:\.(\d+))?:\s*(\w+)",
-            line,
-        )
+        m = _PKT_RE.match(line)
         if m:
             packet_count += 1
             src_ip = m.group(1)
-            dst_ip = m.group(2)
-            dst_port = m.group(3)
-            proto = m.group(4).lower()
+            dst_ip = m.group(3)
+            dst_port = m.group(4)
+            proto = _normalize_proto(m.group(5))
 
             ip_counter[src_ip] += 1
             ip_counter[dst_ip] += 1
@@ -370,11 +384,10 @@ async def traffic_stats(params: TrafficStatsInput) -> str:
             if dst_port:
                 port_counter[dst_port] += 1
 
-        # Extract packet length
+        # Extract packet length ("length N")
         size_m = re.search(r"length\s+(\d+)", line)
         if size_m:
             size = int(size_m.group(1))
-            # Bucket sizes
             bucket = f"{size // 100 * 100}-{(size // 100 + 1) * 100 - 1}B"
             size_counter[bucket] += 1
 
@@ -396,8 +409,9 @@ async def traffic_stats(params: TrafficStatsInput) -> str:
     lines.append(f"### 🗣️ Top {params.top_n} 活跃 IP（按发包数）")
     lines.append("| IP | 包数 | 占比 |")
     lines.append("|------|------|------|")
+    total_packets = sum(ip_counter.values()) or 1
     for ip, cnt in ip_counter.most_common(params.top_n):
-        pct = cnt / (sum(ip_counter.values()) or 1) * 100
+        pct = cnt / total_packets * 100
         bar = "█" * min(int(pct / 2), 25)
         lines.append(f"| {ip} | {cnt} | {bar} {pct:.1f}% |")
     lines.append("")
@@ -408,7 +422,7 @@ async def traffic_stats(params: TrafficStatsInput) -> str:
     lines.append("|------|------|------|")
     for proto, cnt in proto_counter.most_common():
         pct = cnt / packet_count * 100
-        lines.append(f"| {proto.upper()} | {cnt} | {pct:.1f}% |")
+        lines.append(f"| {proto} | {cnt} | {pct:.1f}% |")
     lines.append("")
 
     # Top ports
@@ -429,7 +443,7 @@ async def traffic_stats(params: TrafficStatsInput) -> str:
             lines.append(f"| {port} | {svc} | {cnt} |")
         lines.append("")
 
-    # Size distribution (simplified)
+    # Size distribution
     if size_counter and len(size_counter) > 1:
         lines.append("### 📦 包大小分布")
         lines.append("| 大小范围 | 包数 |")
@@ -477,7 +491,6 @@ class PortMonitorInput(BaseModel):
     @classmethod
     def validate_ports(cls, v: str) -> str:
         _no_shell_meta(v)
-        # Basic port format validation
         for p in v.split(","):
             p = p.strip()
             if not p or not p.isdigit() or int(p) < 1 or int(p) > 65535:
@@ -491,7 +504,7 @@ class PortMonitorInput(BaseModel):
         return v
 
 
-# Port ↔ service name mapping
+# Port → service name mapping
 _PORT_SERVICES = {
     "21": "FTP", "22": "SSH", "23": "Telnet", "25": "SMTP",
     "53": "DNS", "80": "HTTP", "110": "POP3", "123": "NTP",
@@ -534,7 +547,7 @@ async def port_monitor(params: PortMonitorInput) -> str:
         return _fmt("Port Monitor", params.target, " ".join(cmd), result)
 
     # 2. Parse current port states
-    current_ports: dict[str, str] = {}  # port -> "open"/"closed"/"filtered"
+    current_ports: dict[str, str] = {}
     for line in result.stdout.split("\n"):
         m = re.match(r"(\d+)/(tcp|udp)\s+(open|closed|filtered)\s+(\S*)", line)
         if m:
@@ -543,7 +556,6 @@ async def port_monitor(params: PortMonitorInput) -> str:
             service = m.group(4).strip() or _PORT_SERVICES.get(port, "?")
             current_ports[port] = f"{state} ({service})"
 
-    # Also include ports that weren't reported (likely filtered)
     for p in params.ports.split(","):
         p = p.strip()
         if p not in current_ports:
@@ -567,15 +579,11 @@ async def port_monitor(params: PortMonitorInput) -> str:
     # 4. Compute changes
     newly_opened: dict[str, str] = {}
     newly_closed: dict[str, str] = {}
-    still_open: dict[str, str] = {}
 
     for port, status in current_ports.items():
         prev_status = previous_ports.get(port, "")
-        if "open" in status:
-            if "open" not in prev_status:
-                newly_opened[port] = status
-            else:
-                still_open[port] = status
+        if "open" in status and "open" not in prev_status:
+            newly_opened[port] = status
 
     for port, status in previous_ports.items():
         if port in current_ports:
