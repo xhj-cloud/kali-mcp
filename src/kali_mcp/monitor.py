@@ -357,7 +357,7 @@ async def traffic_stats(params: TrafficStatsInput) -> str:
     ]
 
     if params.filter_expr:
-        cmd.append(params.filter_expr)
+        cmd.extend(params.filter_expr.split())
 
     timeout = params.duration + 10
     result = await executor.run(cmd, timeout=timeout)
