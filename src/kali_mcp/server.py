@@ -37,6 +37,7 @@ from fastmcp import FastMCP
 
 # -- Tools --------------------------------------------------------------------
 from kali_mcp.tools import TOOL_REGISTRY
+from kali_mcp.monitor import MONITOR_TOOLS
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -56,8 +57,10 @@ logger = logging.getLogger("kali_mcp")
 mcp = FastMCP(
     name="Kali Tools",
     instructions=(
-        "Kali Linux network maintenance tools for AI assistants. "
-        "Provides port scanning (nmap), network discovery (arp-scan), "
+        "Kali Linux network tools for AI assistants. "
+        "Provides device change detection (network_diff), live traffic analysis (traffic_stats), "
+        "port uptime monitoring (port_monitor), port scanning (nmap), "
+        "network discovery (arp-scan), topology mapping with Mermaid diagrams, "
         "diagnostics (ping, traceroute, mtr), DNS queries (dig), "
         "WHOIS lookups, packet capture (tcpdump), HTTP testing (curl), "
         "and system network information (ss, ip route, ip addr). "
@@ -131,6 +134,13 @@ for _name, (_func, _model) in TOOL_REGISTRY.items():
     logger.info("Registered tool: %s", _name)
 
 logger.info("Network tools: %d registered", len(TOOL_REGISTRY))
+
+# Register monitoring tools (always enabled — 🟢 network maintenance)
+for _name, (_func, _model) in MONITOR_TOOLS.items():
+    _register_tool_with_model(_name, _func, _model)
+    logger.info("Registered monitor tool: %s", _name)
+
+logger.info("Monitor tools: %d registered", len(MONITOR_TOOLS))
 
 # Conditionally register pentest tools
 _pentest_enabled = os.getenv("PENTEST_ENABLED", "").lower() in ("true", "1", "yes")

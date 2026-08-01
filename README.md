@@ -1,11 +1,11 @@
 # 🔍 Kali MCP Server
 
-> 将 Kali Linux 变成你的 AI 网络助手 —— 32 个工具，从网络维护到渗透攻击，对话即操作。
+> 将 Kali Linux 变成你的 AI 网络助手 —— 35 个工具，从网络维护到渗透攻击，对话即操作。
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
 [![FastMCP](https://img.shields.io/badge/FastMCP-3.4+-green.svg)](https://gofastmcp.com)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tools](https://img.shields.io/badge/Tools-32-orange.svg)]()
+[![Tools](https://img.shields.io/badge/Tools-35-orange.svg)]()
 
 ---
 
@@ -25,11 +25,14 @@
 
 在 Cherry Studio / Claude Desktop 对话中直接：
 
-### 🟢 网络维护（14 工具，默认）
+### 🟢 网络维护（17 工具，默认）
 
 | 场景 | 对话示例 |
 |------|----------|
 | 设备发现 | "扫描 192.168.0.0/24 有哪些在线设备" |
+| 设备变更 | "对比基线快照，看谁上线/离线了" |
+| 流量统计 | "抓 30 秒流量看看谁在用带宽" |
+| 端口监控 | "监控 192.168.0.1 的 22/80/443 端口状态" |
 | 端口扫描 | "192.168.0.13 开放了哪些端口和服务" |
 | 连接测试 | "ping 一下 8.8.8.8 看看延迟" |
 | 路由诊断 | "traceroute 看看去百度走什么路径" |
@@ -78,7 +81,7 @@
 │  Cherry Studio    │ ────── :8000/mcp ──────────→ │  Kali MCP Server         │
 │  Claude Desktop   │                              │  (FastMCP 3.x)           │
 └──────────────────┘                              ├──────────────────────────┤
-                                                   │ 🟢 14 网络维护 (默认)    │
+                                                   │ 🟢 17 网络维护 (默认)    │
                                                    │ 🟡 7 渗透侦察 (可开关)   │
                                                    │ 🔴 11 主动攻击 (可开关)   │
                                                    └──────────────────────────┘
@@ -160,26 +163,29 @@ Cherry Studio → 设置 → MCP 服务器 → 添加：
 | 10 | `routing_table` | ip route | 🟢 | 内核路由表 |
 | 11 | `tcpdump_capture` | tcpdump | 🟢 | 实时抓包 (BPF 过滤) |
 | 12 | `http_request` | curl | 🟢 | HTTP 请求测试 |
-| 13 | `nmap_vuln_scan` | nmap --script | 🟡 | CVE 漏洞 + 广播发现 |
-| 14 | `searchsploit` | searchsploit | 🟡 | Exploit-DB 离线搜索 |
-| 15 | `whatweb_scan` | whatweb | 🟡 | Web 技术栈指纹 |
-| 16 | `nikto_scan` | nikto | 🟡 | Web 漏洞扫描 (6700+ 规则) |
-| 17 | `gobuster_dir` | gobuster | 🟡 | Web 目录/文件爆破 |
-| 18 | `enum4linux_scan` | enum4linux | 🟡 | SMB 用户/共享/OS 枚举 |
-| 19 | `hydra_brute` | hydra | 🟡 | 服务密码爆破 |
-| 20 | `sqlmap_scan` | sqlmap | 🔴 | SQL 注入检测与利用 |
-| 21 | `wpscan_scan` | wpscan | 🔴 | WordPress 漏洞+用户枚举 |
-| 22 | `msfvenom_gen` | msfvenom | 🔴 | Payload 生成 (不执行) |
-| 23 | `nc_operate` | netcat | 🔴 | TCP 监听/连接/端口扫描 |
-| 24 | `responder_run` | responder | 🔴 | NTLM 哈希捕获/投毒 |
-| 25 | `crackmapexec_run` | crackmapexec | 🔴 | SMB/WinRM/MSSQL 攻击 |
-| 26 | `airodump_scan` | airodump-ng | 🔴 | WiFi 扫描 + 握手包捕获 |
-| 27 | `john_crack` | john | 🔴 | 密码哈希离线破解 |
-| 28 | `network_topology` | arp-scan | 🟢 | ARP 网络拓扑图（Mermaid） |
-| 29 | `snmp_topology` | snmpwalk/arp-scan | 🟢 | SNMP 精确拓扑（回退 ARP） |
-| 30 | `arpspoof_disconnect` | arpspoof | 🔴 | ARP 欺骗永久踢人下线 |
-| 31 | `arpspoof_stop` | kill | 🔴 | 恢复被踢设备网络 |
-| 32 | `dhcp_flood` | yersinia | 🔴 | DHCP 泛洪耗尽 IP 池 |
+| 13 | `network_diff` | arp-scan | 🟢 | 设备变更检测（对比快照） |
+| 14 | `traffic_stats` | tcpdump | 🟢 | 实时流量统计（Top IP/协议/端口） |
+| 15 | `port_monitor` | nmap | 🟢 | 端口状态监控（开/关变化追踪） |
+| 16 | `nmap_vuln_scan` | nmap --script | 🟡 | CVE 漏洞 + 广播发现 |
+| 17 | `searchsploit` | searchsploit | 🟡 | Exploit-DB 离线搜索 |
+| 18 | `whatweb_scan` | whatweb | 🟡 | Web 技术栈指纹 |
+| 19 | `nikto_scan` | nikto | 🟡 | Web 漏洞扫描 (6700+ 规则) |
+| 20 | `gobuster_dir` | gobuster | 🟡 | Web 目录/文件爆破 |
+| 21 | `enum4linux_scan` | enum4linux | 🟡 | SMB 用户/共享/OS 枚举 |
+| 22 | `hydra_brute` | hydra | 🟡 | 服务密码爆破 |
+| 23 | `sqlmap_scan` | sqlmap | 🔴 | SQL 注入检测与利用 |
+| 24 | `wpscan_scan` | wpscan | 🔴 | WordPress 漏洞+用户枚举 |
+| 25 | `msfvenom_gen` | msfvenom | 🔴 | Payload 生成 (不执行) |
+| 26 | `nc_operate` | netcat | 🔴 | TCP 监听/连接/端口扫描 |
+| 27 | `responder_run` | responder | 🔴 | NTLM 哈希捕获/投毒 |
+| 28 | `crackmapexec_run` | crackmapexec | 🔴 | SMB/WinRM/MSSQL 攻击 |
+| 29 | `airodump_scan` | airodump-ng | 🔴 | WiFi 扫描 + 握手包捕获 |
+| 30 | `john_crack` | john | 🔴 | 密码哈希离线破解 |
+| 31 | `network_topology` | arp-scan | 🟢 | ARP 网络拓扑图（Mermaid） |
+| 32 | `snmp_topology` | snmpwalk/arp-scan | 🟢 | SNMP 精确拓扑（回退 ARP） |
+| 33 | `arpspoof_disconnect` | arpspoof | 🔴 | ARP 欺骗永久踢人下线 |
+| 34 | `arpspoof_stop` | kill | 🔴 | 恢复被踢设备网络 |
+| 35 | `dhcp_flood` | yersinia | 🔴 | DHCP 泛洪耗尽 IP 池 |
 
 ---
 
