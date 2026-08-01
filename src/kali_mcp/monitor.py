@@ -275,9 +275,9 @@ class TrafficStatsInput(BaseModel):
         le=300,
     )
     count: int = Field(
-        default=100,
-        description="Maximum packets to capture (reduced if duration expires first)",
-        ge=50,
+        default=50,
+        description="Maximum packets to capture. Use lower values (20-50) for filtered/single-host captures.",
+        ge=20,
         le=10000,
     )
     filter_expr: str = Field(
