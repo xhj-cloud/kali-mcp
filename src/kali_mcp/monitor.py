@@ -275,8 +275,8 @@ class TrafficStatsInput(BaseModel):
         le=300,
     )
     count: int = Field(
-        default=500,
-        description="Maximum packets to capture",
+        default=200,
+        description="Maximum packets to capture (reduced if duration expires first)",
         ge=50,
         le=10000,
     )
@@ -333,7 +333,7 @@ async def traffic_stats(params: TrafficStatsInput) -> str:
         "tcpdump",
         "-i", params.interface,
         "-c", str(params.count),
-        "-l", "-n", "-tt", "-q",
+        "-l", "-n", "-tt",
     ]
 
     if params.filter_expr:
@@ -343,7 +343,7 @@ async def traffic_stats(params: TrafficStatsInput) -> str:
     result = await executor.run(cmd, timeout=timeout)
 
     # 2. Parse capture output
-    # tcpdump -q format: timestamp IP src > dst: tcp/UDP/etc, length N
+    # tcpdump -tt format: unix_ts IP src.port > dst.port: Flags [...], length N
     ip_counter: Counter = Counter()
     proto_counter: Counter = Counter()
     port_counter: Counter = Counter()

@@ -87,15 +87,33 @@ class CommandExecutor:
         except asyncio.TimeoutError:
             try:
                 proc.kill()
+                # Collect partial output that was already buffered
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    proc.communicate(), timeout=10
+                )
+                stdout = stdout_bytes.decode("utf-8", errors="replace").strip()
+                stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
+                stderr = (
+                    stderr + f"\n[timed out after {timeout}s, showing partial output]"
+                ).strip()
+                logger.warning(
+                    "Command timed out after %ds (partial: %d chars): %s",
+                    timeout, len(stdout), cmd_str,
+                )
+                return CommandResult(
+                    stdout=stdout,
+                    stderr=stderr,
+                    returncode=-1,
+                    success=False,
+                )
             except Exception:
-                pass
-            logger.warning("Command timed out after %ds: %s", timeout, cmd_str)
-            return CommandResult(
-                stdout="",
-                stderr=f"Command timed out after {timeout} seconds",
-                returncode=-1,
-                success=False,
-            )
+                logger.warning("Command timed out after %ds: %s", timeout, cmd_str)
+                return CommandResult(
+                    stdout="",
+                    stderr=f"Command timed out after {timeout} seconds",
+                    returncode=-1,
+                    success=False,
+                )
 
         except FileNotFoundError:
             logger.error("Command not found: %s", cmd[0])
