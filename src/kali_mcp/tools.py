@@ -667,7 +667,7 @@ async def tcpdump_capture(params: TcpdumpInput) -> str:
         cmd.append("-n")
 
     if params.filter_expr:
-        cmd.append(params.filter_expr)
+        cmd.extend(params.filter_expr.split())
 
     timeout = params.duration + 5
     executor = get_executor(timeout=timeout)
