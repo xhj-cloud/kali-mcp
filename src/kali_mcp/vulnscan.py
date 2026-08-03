@@ -54,7 +54,7 @@ class NucleiInput(BaseModel):
         le=200,
     )
     timeout_per_template: int = Field(
-        default=10,
+        default=5,
         description="Max seconds per template check",
         ge=3,
         le=60,
@@ -89,7 +89,7 @@ async def nuclei_scan(params: NucleiInput) -> str:
 
     Requires: nuclei + templates (sudo apt install nuclei -y && nuclei -ut)
     """
-    executor = get_executor(timeout=300)
+    executor = get_executor(timeout=90)
 
     cmd = [
         "nuclei",
@@ -97,6 +97,8 @@ async def nuclei_scan(params: NucleiInput) -> str:
         "-severity", params.severity,
         "-silent",
         "-no-color",
+        "-no-stdin",
+        "-no-interactsh",
         "-timeout", str(params.timeout_per_template),
         "-stats-interval", "5",
         "-rl", "10",        # rate limit: 10 req/s
