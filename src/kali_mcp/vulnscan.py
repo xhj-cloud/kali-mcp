@@ -64,6 +64,10 @@ class NucleiInput(BaseModel):
         ge=3,
         le=60,
     )
+    async_mode: bool = Field(
+        default=False,
+        description="Run in background and return immediately. Use nuclei_results to fetch later.",
+    )
 
     @field_validator("target")
     @classmethod
@@ -102,6 +106,26 @@ async def nuclei_scan(params: NucleiInput) -> str:
     Requires: nuclei + templates (sudo apt install nuclei -y && nuclei -ut)
     """
     executor = get_executor(timeout=90)
+
+    # Async mode: spawn background process, write to file, return immediately
+    if params.async_mode:
+        import asyncio, os
+        outfile = os.path.expanduser("~/.kali-mcp/nuclei_results.txt")
+        os.makedirs(os.path.dirname(outfile), exist_ok=True)
+        bg_cmd = (
+            f"nohup nuclei -u {params.target} "
+            f"-severity {params.severity} "
+            f"-no-color -silent "
+            f"-stats-interval 5 "
+            f"> {outfile} 2>&1 &"
+        )
+        await executor.run(["bash", "-c", bg_cmd], timeout=10)
+        return (
+            f"## 🧬 Nuclei 后台扫描\n"
+            f"**目标:** `{params.target}` | **过滤:** severity≥{params.severity}\n\n"
+            f"> 🔄 扫描已在后台启动。结果保存到 `{outfile}`。\n\n"
+            f"使用 `nuclei_results` 工具查看进度和结果。"
+        )
 
     cmd = [
         "nuclei",
@@ -612,11 +636,58 @@ async def snmpenum_scan(params: SnmpenumInput) -> str:
 
 
 # ===================================================================
+# 5. Nuclei Results — read background scan output
+# ===================================================================
+
+
+class NucleiResultsInput(BaseModel):
+    """No-arg input for fetching nuclei background results."""
+
+    pass
+
+
+async def nuclei_results(_params: NucleiResultsInput = None) -> str:
+    """Fetch results from a background nuclei scan.
+
+    After starting a nuclei_scan with async_mode=True, use this tool
+    to check if the scan is complete and retrieve findings.
+
+    Reads from ~/.kali-mcp/nuclei_results.txt on the Kali host.
+    """
+    import os
+    outfile = os.path.expanduser("~/.kali-mcp/nuclei_results.txt")
+
+    if not os.path.exists(outfile):
+        return "## Nuclei Results\n\nNo background scan found. Start one with nuclei_scan(async_mode=true)."
+
+    with open(outfile, "r") as f:
+        raw = f.read().strip()
+
+    if not raw:
+        return "## Nuclei Scan In Progress\n\nScan is running, no results yet. Check again later."
+
+    findings = [l.strip() for l in raw.split("\n") if l.strip()
+                and not l.strip().startswith("[INF]")
+                and not l.strip().startswith("[WRN]")]
+
+    result = f"## Nuclei Background Scan Results\n\n**Findings:** {len(findings)}\n\n"
+    if findings:
+        result += "```\n" + "\n".join(findings[:50]) + "\n```\n"
+    else:
+        result += "No vulnerabilities found, or scan still running.\n"
+
+    return result
+
+
+
+
+# ===================================================================
 # Registry
 # ===================================================================
 
 VULNSCAN_TOOLS: dict[str, tuple[callable, type[BaseModel]]] = {
     "nuclei_scan": (nuclei_scan, NucleiInput),
+    "nuclei_results": (nuclei_results, NucleiResultsInput),
     "ffuf_fuzz": (ffuf_fuzz, FfufInput),
     "dnsenum_scan": (dnsenum_scan, DnsenumInput),
     "snmpenum_scan": (snmpenum_scan, SnmpenumInput),
