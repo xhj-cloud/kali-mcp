@@ -154,6 +154,15 @@ if _pentest_enabled:
 
         logger.info("Pentest tools: %d registered (PENTEST_ENABLED=%s)",
                      len(PENTEST_TOOLS), os.getenv("PENTEST_ENABLED"))
+
+        # Vulnerability discovery tools (same guard as pentest)
+        from kali_mcp.vulnscan import VULNSCAN_TOOLS
+
+        for _name, (_func, _model) in VULNSCAN_TOOLS.items():
+            _register_tool_with_model(_name, _func, _model)
+            logger.info("Registered vulnscan tool: %s", _name)
+
+        logger.info("Vulnscan tools: %d registered", len(VULNSCAN_TOOLS))
     except ImportError as e:
         logger.warning("Pentest module import failed: %s", e)
 else:

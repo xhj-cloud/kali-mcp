@@ -117,6 +117,10 @@ PENTEST_PKGS=(
     gobuster
     enum4linux
     hydra
+    nuclei
+    ffuf
+    dnsrecon
+    snmp-check
     seclists
     exploitdb
 )
