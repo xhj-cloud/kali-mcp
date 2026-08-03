@@ -47,6 +47,11 @@ class NucleiInput(BaseModel):
         description="Template tags filter (e.g. 'cve,oast,xss'). Leave empty for all.",
         max_length=256,
     )
+    template: str = Field(
+        default="",
+        description="Specific template or template dir (e.g. 'http/cves/'). Fast! Skips full library load.",
+        max_length=512,
+    )
     max_results: int = Field(
         default=30,
         description="Max findings to report",
@@ -69,6 +74,13 @@ class NucleiInput(BaseModel):
     @field_validator("tags")
     @classmethod
     def validate_tags(cls, v: str) -> str:
+        if v:
+            _no_shell_meta(v)
+        return v
+
+    @field_validator("template")
+    @classmethod
+    def validate_template(cls, v: str) -> str:
         if v:
             _no_shell_meta(v)
         return v
@@ -108,6 +120,8 @@ async def nuclei_scan(params: NucleiInput) -> str:
 
     if params.tags:
         cmd.extend(["-tags", params.tags])
+    if params.template:
+        cmd.extend(["-t", params.template])
 
     # Limit results count
     # Nuclei doesn't have a built-in limit; we'll truncate after capture
