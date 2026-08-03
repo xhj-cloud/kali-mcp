@@ -1,11 +1,11 @@
 # 🔍 Kali MCP Server
 
-> 将 Kali Linux 变成你的 AI 网络助手 —— 35 个工具，从网络维护到渗透攻击，对话即操作。
+> 将 Kali Linux 变成你的 AI 网络助手 —— 39 个工具，从网络维护到漏洞挖掘，对话即操作。
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
 [![FastMCP](https://img.shields.io/badge/FastMCP-3.4+-green.svg)](https://gofastmcp.com)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tools](https://img.shields.io/badge/Tools-35-orange.svg)]()
+[![Tools](https://img.shields.io/badge/Tools-39-orange.svg)]()
 
 ---
 
@@ -45,11 +45,15 @@
 | 抓包分析 | "抓取 eth0 上 100 个 HTTP 数据包" |
 | HTTP 测试 | "用 curl 请求 https://httpbin.org/ip" |
 
-### 🟡 渗透侦察（7 工具，`PENTEST_ENABLED=true`）
+### 🟡 渗透侦察（11 工具，`PENTEST_ENABLED=true`）
 
 | 场景 | 对话示例 |
 |------|----------|
-| 漏洞扫描 | "用 nmap 扫描 192.168.0.1 的 CVE 漏洞" |
+| 漏洞扫描 | "用 nuclei 扫一下 https://example.com 的漏洞" |
+| Web 模糊测试 | "ffuf 爆破 https://target.com/FUZZ 的隐藏目录" |
+| DNS 侦察 | "枚举 example.com 的子域名和 DNS 记录" |
+| SNMP 枚举 | "snmp 枚举 192.168.0.1 的系统信息和用户" |
+| CVE 扫描 | "用 nmap 扫描 192.168.0.1 的 CVE 漏洞" |
 | 目录爆破 | "爆破 http://192.168.0.1 的隐藏目录" |
 | Web 漏洞 | "nikto 扫描 http://192.168.0.1 的安全问题" |
 | SMB 枚举 | "枚举 192.168.0.13 的 SMB 用户和共享" |
@@ -82,7 +86,7 @@
 │  Claude Desktop   │                              │  (FastMCP 3.x)           │
 └──────────────────┘                              ├──────────────────────────┤
                                                    │ 🟢 17 网络维护 (默认)    │
-                                                   │ 🟡 7 渗透侦察 (可开关)   │
+                                                   │ 🟡 11 渗透侦察 (可开关)  │
                                                    │ 🔴 11 主动攻击 (可开关)   │
                                                    └──────────────────────────┘
 ```
@@ -166,26 +170,30 @@ Cherry Studio → 设置 → MCP 服务器 → 添加：
 | 13 | `network_diff` | arp-scan | 🟢 | 设备变更检测（对比快照） |
 | 14 | `traffic_stats` | tcpdump | 🟢 | 实时流量统计（Top IP/协议/端口） |
 | 15 | `port_monitor` | nmap | 🟢 | 端口状态监控（开/关变化追踪） |
-| 16 | `nmap_vuln_scan` | nmap --script | 🟡 | CVE 漏洞 + 广播发现 |
-| 17 | `searchsploit` | searchsploit | 🟡 | Exploit-DB 离线搜索 |
-| 18 | `whatweb_scan` | whatweb | 🟡 | Web 技术栈指纹 |
-| 19 | `nikto_scan` | nikto | 🟡 | Web 漏洞扫描 (6700+ 规则) |
-| 20 | `gobuster_dir` | gobuster | 🟡 | Web 目录/文件爆破 |
-| 21 | `enum4linux_scan` | enum4linux | 🟡 | SMB 用户/共享/OS 枚举 |
-| 22 | `hydra_brute` | hydra | 🟡 | 服务密码爆破 |
-| 23 | `sqlmap_scan` | sqlmap | 🔴 | SQL 注入检测与利用 |
-| 24 | `wpscan_scan` | wpscan | 🔴 | WordPress 漏洞+用户枚举 |
-| 25 | `msfvenom_gen` | msfvenom | 🔴 | Payload 生成 (不执行) |
-| 26 | `nc_operate` | netcat | 🔴 | TCP 监听/连接/端口扫描 |
-| 27 | `responder_run` | responder | 🔴 | NTLM 哈希捕获/投毒 |
-| 28 | `crackmapexec_run` | crackmapexec | 🔴 | SMB/WinRM/MSSQL 攻击 |
-| 29 | `airodump_scan` | airodump-ng | 🔴 | WiFi 扫描 + 握手包捕获 |
-| 30 | `john_crack` | john | 🔴 | 密码哈希离线破解 |
-| 31 | `network_topology` | arp-scan | 🟢 | ARP 网络拓扑图（Mermaid） |
-| 32 | `snmp_topology` | snmpwalk/arp-scan | 🟢 | SNMP 精确拓扑（回退 ARP） |
-| 33 | `arpspoof_disconnect` | arpspoof | 🔴 | ARP 欺骗永久踢人下线 |
-| 34 | `arpspoof_stop` | kill | 🔴 | 恢复被踢设备网络 |
-| 35 | `dhcp_flood` | yersinia | 🔴 | DHCP 泛洪耗尽 IP 池 |
+| 16 | `nuclei_scan` | nuclei | 🟡 | 模板化漏洞扫描 (3000+ CVE) |
+| 17 | `ffuf_fuzz` | ffuf | 🟡 | Web 模糊测试 (目录/参数/虚拟主机) |
+| 18 | `dnsenum_scan` | dnsrecon | 🟡 | DNS 侦察 (子域名/域传送) |
+| 19 | `snmpenum_scan` | snmp-check | 🟡 | SNMP 枚举 (系统/用户/进程/网络) |
+| 20 | `nmap_vuln_scan` | nmap --script | 🟡 | CVE 漏洞 + 广播发现 |
+| 21 | `searchsploit` | searchsploit | 🟡 | Exploit-DB 离线搜索 |
+| 22 | `whatweb_scan` | whatweb | 🟡 | Web 技术栈指纹 |
+| 23 | `nikto_scan` | nikto | 🟡 | Web 漏洞扫描 (6700+ 规则) |
+| 24 | `gobuster_dir` | gobuster | 🟡 | Web 目录/文件爆破 |
+| 25 | `enum4linux_scan` | enum4linux | 🟡 | SMB 用户/共享/OS 枚举 |
+| 26 | `hydra_brute` | hydra | 🟡 | 服务密码爆破 |
+| 27 | `sqlmap_scan` | sqlmap | 🔴 | SQL 注入检测与利用 |
+| 28 | `wpscan_scan` | wpscan | 🔴 | WordPress 漏洞+用户枚举 |
+| 29 | `msfvenom_gen` | msfvenom | 🔴 | Payload 生成 (不执行) |
+| 30 | `nc_operate` | netcat | 🔴 | TCP 监听/连接/端口扫描 |
+| 31 | `responder_run` | responder | 🔴 | NTLM 哈希捕获/投毒 |
+| 32 | `crackmapexec_run` | crackmapexec | 🔴 | SMB/WinRM/MSSQL 攻击 |
+| 33 | `airodump_scan` | airodump-ng | 🔴 | WiFi 扫描 + 握手包捕获 |
+| 34 | `john_crack` | john | 🔴 | 密码哈希离线破解 |
+| 35 | `network_topology` | arp-scan | 🟢 | ARP 网络拓扑图（Mermaid） |
+| 36 | `snmp_topology` | snmpwalk/arp-scan | 🟢 | SNMP 精确拓扑（回退 ARP） |
+| 37 | `arpspoof_disconnect` | arpspoof | 🔴 | ARP 欺骗永久踢人下线 |
+| 38 | `arpspoof_stop` | kill | 🔴 | 恢复被踢设备网络 |
+| 39 | `dhcp_flood` | yersinia | 🔴 | DHCP 泛洪耗尽 IP 池 |
 
 ---
 
