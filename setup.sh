@@ -120,7 +120,8 @@ PENTEST_PKGS=(
     nuclei
     ffuf
     dnsrecon
-    snmp-check
+    snmp
+    onesixtyone
     seclists
     exploitdb
 )
