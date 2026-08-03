@@ -107,29 +107,39 @@ async def nuclei_scan(params: NucleiInput) -> str:
     """
     executor = get_executor(timeout=90)
 
-    # Async mode: spawn background process, write to file, return immediately
+    # Async mode: spawn background nuclei via asyncio subprocess
     if params.async_mode:
         import asyncio, os
         outfile = os.path.expanduser("~/.kali-mcp/nuclei_results.txt")
         os.makedirs(os.path.dirname(outfile), exist_ok=True)
-        # Build full cmd args for background
-        bg_args = f"-u {params.target} -severity {params.severity}"
+
+        # Ensure templates exist
+        home = os.path.expanduser("~")
+        tpl_dir = os.path.join(home, "nuclei-templates")
+        if not os.path.isdir(tpl_dir):
+            await executor.run(["nuclei", "-ut"], timeout=180)
+
+        # Build cmd as list (safe, no shell)
+        bg_cmd = [
+            "nuclei", "-u", params.target,
+            "-severity", params.severity,
+            "-no-color", "-silent",
+            "-stats-interval", "5",
+        ]
         if params.tags:
-            bg_args += f" -tags {params.tags}"
+            bg_cmd.extend(["-tags", params.tags])
         if params.template:
-            bg_args += f" -t {params.template}"
-        bg_cmd = (
-            f"cd /root && nohup nuclei {bg_args} "
-            f"-no-color -silent -stats-interval 5 "
-            f"> {outfile} 2>&1 &"
-        )
-        # Ensure templates exist before launching bg scan
-        await executor.run(["nuclei", "-ut", "-silent"], timeout=120)
-        await executor.run(["bash", "-l", "-c", bg_cmd], timeout=10)
+            bg_cmd.extend(["-t", params.template])
+
+        # Spawn detached subprocess, redirect output to file
+        with open(outfile, "w") as f_out:
+            proc = await asyncio.create_subprocess_exec(
+                *bg_cmd, stdout=f_out, stderr=f_out,
+            )
         return (
             f"## 🧬 Nuclei 后台扫描\n"
             f"**目标:** `{params.target}` | **过滤:** severity≥{params.severity}\n\n"
-            f"> 🔄 扫描已在后台启动。结果保存到 `{outfile}`。\n\n"
+            f"> 🔄 扫描已在后台启动 (PID {proc.pid})。结果保存到 `{outfile}`。\n\n"
             f"使用 `nuclei_results` 工具查看进度和结果。"
         )
 
