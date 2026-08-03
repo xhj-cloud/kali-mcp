@@ -107,10 +107,7 @@ async def nuclei_scan(params: NucleiInput) -> str:
         "nuclei",
         "-u", params.target,
         "-severity", params.severity,
-        "-silent",
         "-no-color",
-        "-no-stdin",
-        "-no-interactsh",
         "-timeout", str(params.timeout_per_template),
         "-stats-interval", "5",
         "-rl", "10",        # rate limit: 10 req/s
