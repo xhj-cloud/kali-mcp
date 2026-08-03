@@ -411,26 +411,27 @@ async def dnsenum_scan(params: DnsenumInput) -> str:
 
     result = await executor.run(cmd, timeout=180)
 
+    # dnsrecon outputs to stderr (not stdout)
+    raw_output = result.stdout.strip() or result.stderr.strip()
+
     lines = [
         f"## 🌐 DNS 侦察 — {params.domain}",
         f"**模式:** {params.mode}" + (f" | **DNS:** {params.dns_server}" if params.dns_server else ""),
         "",
     ]
 
-    if not result.stdout.strip():
+    if not raw_output:
         lines.append("> ⚠️ 未获取到 DNS 记录。请检查 dnsrecon 是否正确安装：`sudo apt install dnsrecon -y`")
-        if result.stderr:
-            lines.append(f"\n**诊断:**\n```\n{result.stderr[:1000]}\n```")
         return "\n".join(lines)
 
-    # Pass through raw output, keeping it readable for AI
-    output = result.stdout.strip()
-    # Truncate if too long
-    if len(output) > 6000:
-        output = output[:6000] + "\n\n... (truncated)"
+    # Strip INFO/ERROR prefixes for cleaner reading
+    clean = re.sub(r"\d{4}-\d{2}-\d{2}T[\d:.]+[+-]\d{4}\s*\w+\s*", "", raw_output)
+
+    if len(clean) > 6000:
+        clean = clean[:6000] + "\n\n... (truncated)"
 
     lines.append("```")
-    lines.append(output)
+    lines.append(clean.strip())
     lines.append("```")
 
     return "\n".join(lines)
