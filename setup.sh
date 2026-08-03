@@ -126,6 +126,15 @@ PENTEST_PKGS=(
     exploitdb
 )
 
+# Auto-download nuclei templates (not in apt)
+_nuclei_setup() {
+    if command -v nuclei &>/dev/null; then
+        echo -e "  Downloading nuclei templates..."
+        nuclei -ut -silent 2>&1 | tail -1 || true
+        ok "nuclei templates ready"
+    fi
+}
+
 # --- Attack packages (--tool-level full) ---
 ATTACK_PKGS=(
     sqlmap
@@ -152,6 +161,7 @@ if [ "$TOOL_LEVEL" = "pentest" ] || [ "$TOOL_LEVEL" = "full" ]; then
     echo -e "  Installing pentest packages..."
     $SUDO apt install -y -qq "${PENTEST_PKGS[@]}" 2>&1 | tail -1
     ok "Pentest packages ($(echo "${PENTEST_PKGS[@]}" | wc -w) pkgs)"
+    _nuclei_setup
 fi
 
 if [ "$TOOL_LEVEL" = "full" ]; then
