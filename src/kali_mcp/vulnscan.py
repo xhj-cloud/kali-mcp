@@ -112,6 +112,13 @@ async def nuclei_scan(params: NucleiInput) -> str:
 
     result = await executor.run(cmd, timeout=300)
 
+    # Auto-download templates on first run, then retry
+    if not result.success and "no templates" in (result.stderr or "").lower():
+        dl = await executor.run(["nuclei", "-ut", "-silent"], timeout=180)
+        if dl.success:
+            result = await executor.run(cmd, timeout=300)
+
+
     if not result.success:
         if "no templates" in (result.stderr or "").lower():
             return (
