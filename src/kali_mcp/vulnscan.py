@@ -119,7 +119,7 @@ async def nuclei_scan(params: NucleiInput) -> str:
         if params.template:
             bg_args += f" -t {params.template}"
         bg_cmd = (
-            f"cd ~ && nohup nuclei {bg_args} "
+            f"cd ~ && HOME=$HOME nohup nuclei {bg_args} "
             f"-no-color -silent -stats-interval 5 "
             f"> {outfile} 2>&1 &"
         )
