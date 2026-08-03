@@ -125,7 +125,7 @@ async def nuclei_scan(params: NucleiInput) -> str:
             f"-no-color -silent -stats-interval 5 "
             f"> {outfile} 2>&1 &"
         )
-        await executor.run(["bash", "-c", bg_cmd], timeout=10)
+        await executor.run(["bash", "-l", "-c", bg_cmd], timeout=10)
         return (
             f"## 🧬 Nuclei 后台扫描\n"
             f"**目标:** `{params.target}` | **过滤:** severity≥{params.severity}\n\n"
