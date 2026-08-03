@@ -87,9 +87,22 @@ async def nuclei_scan(params: NucleiInput) -> str:
     - CVE detection (Log4j, Spring4Shell, etc.)
     - Technology-specific checks (WordPress, Jira, GitLab, etc.)
 
-    Requires: nuclei (sudo apt install nuclei -y)
+    Requires: nuclei + nuclei-templates (sudo apt install nuclei nuclei-templates -y)
     """
     executor = get_executor(timeout=300)
+
+    # Ensure templates are available
+    template_check = await executor.run(
+        ["nuclei", "-templates"], timeout=5
+    )
+    if not template_check.success and "no templates" in template_check.stderr.lower():
+        # Try auto-download
+        await executor.run(["nuclei", "-ut"], timeout=60)
+        # Also try community templates
+        await executor.run(
+            ["nuclei", "-update-template-dir", "/usr/share/nuclei-templates"], timeout=10
+        )
+
     cmd = [
         "nuclei",
         "-u", params.target,
@@ -408,51 +421,21 @@ async def dnsenum_scan(params: DnsenumInput) -> str:
         "",
     ]
 
-    # Parse dnsrecon output sections
-    sections = {
-        "A": [], "AAAA": [], "SOA": [], "NS": [], "MX": [],
-        "TXT": [], "SRV": [], "CNAME": [], "PTR": [], "AXFR": [],
-    }
-    current_type = None
+    if not result.stdout.strip():
+        lines.append("> ⚠️ 未获取到 DNS 记录。请检查 dnsrecon 是否正确安装：`sudo apt install dnsrecon -y`")
+        if result.stderr:
+            lines.append(f"\n**诊断:**\n```\n{result.stderr[:1000]}\n```")
+        return "\n".join(lines)
 
-    for line in result.stdout.split("\n"):
-        line = line.strip()
-        if not line:
-            current_type = None
-            continue
+    # Pass through raw output, keeping it readable for AI
+    output = result.stdout.strip()
+    # Truncate if too long
+    if len(output) > 6000:
+        output = output[:6000] + "\n\n... (truncated)"
 
-        # dnsrecon section headers
-        for rtype in sections:
-            if line.startswith(f"{rtype} ") or line.startswith(f"[*] {rtype} "):
-                current_type = rtype
-                break
-
-        if current_type:
-            sections[current_type].append(line)
-
-    # Also try zone transfer manually with dig if axfr was attempted
-    if params.mode in ("axfr", "all"):
-        axfr_result = await executor.run(
-            ["dig", f"@{params.dns_server or ''}", params.domain, "AXFR", "+short"],
-            timeout=30,
-        )
-        if axfr_result.stdout.strip():
-            sections["AXFR"].extend(axfr_result.stdout.strip().split("\n"))
-
-    # Build output
-    has_data = False
-    for rtype in ["SOA", "NS", "MX", "A", "AAAA", "SRV", "TXT", "CNAME", "AXFR"]:
-        if sections.get(rtype):
-            has_data = True
-            lines.append(f"### 📋 {rtype} 记录")
-            lines.append("```")
-            for entry in sections[rtype][:30]:
-                lines.append(entry)
-            lines.append("```")
-            lines.append("")
-
-    if not has_data:
-        lines.append("> ⚠️ 未获取到 DNS 记录。目标域名可能不存在或 DNS 服务器无响应。")
+    lines.append("```")
+    lines.append(output)
+    lines.append("```")
 
     return "\n".join(lines)
 
