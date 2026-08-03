@@ -112,11 +112,15 @@ async def nuclei_scan(params: NucleiInput) -> str:
         import asyncio, os
         outfile = os.path.expanduser("~/.kali-mcp/nuclei_results.txt")
         os.makedirs(os.path.dirname(outfile), exist_ok=True)
+        # Build full cmd args for background
+        bg_args = f"-u {params.target} -severity {params.severity}"
+        if params.tags:
+            bg_args += f" -tags {params.tags}"
+        if params.template:
+            bg_args += f" -t {params.template}"
         bg_cmd = (
-            f"nohup nuclei -u {params.target} "
-            f"-severity {params.severity} "
-            f"-no-color -silent "
-            f"-stats-interval 5 "
+            f"cd ~ && nohup nuclei {bg_args} "
+            f"-no-color -silent -stats-interval 5 "
             f"> {outfile} 2>&1 &"
         )
         await executor.run(["bash", "-c", bg_cmd], timeout=10)
