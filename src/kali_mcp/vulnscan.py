@@ -123,6 +123,8 @@ async def nuclei_scan(params: NucleiInput) -> str:
             f"-no-color -silent -stats-interval 5 "
             f"> {outfile} 2>&1 &"
         )
+        # Ensure templates exist before launching bg scan
+        await executor.run(["nuclei", "-ut", "-silent"], timeout=120)
         await executor.run(["bash", "-l", "-c", bg_cmd], timeout=10)
         return (
             f"## 🧬 Nuclei 后台扫描\n"
