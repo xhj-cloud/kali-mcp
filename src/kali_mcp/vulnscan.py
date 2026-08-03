@@ -87,21 +87,9 @@ async def nuclei_scan(params: NucleiInput) -> str:
     - CVE detection (Log4j, Spring4Shell, etc.)
     - Technology-specific checks (WordPress, Jira, GitLab, etc.)
 
-    Requires: nuclei + nuclei-templates (sudo apt install nuclei nuclei-templates -y)
+    Requires: nuclei + templates (sudo apt install nuclei -y && nuclei -ut)
     """
     executor = get_executor(timeout=300)
-
-    # Ensure templates are available
-    template_check = await executor.run(
-        ["nuclei", "-templates"], timeout=5
-    )
-    if not template_check.success and "no templates" in template_check.stderr.lower():
-        # Try auto-download
-        await executor.run(["nuclei", "-ut"], timeout=60)
-        # Also try community templates
-        await executor.run(
-            ["nuclei", "-update-template-dir", "/usr/share/nuclei-templates"], timeout=10
-        )
 
     cmd = [
         "nuclei",
@@ -125,6 +113,14 @@ async def nuclei_scan(params: NucleiInput) -> str:
     result = await executor.run(cmd, timeout=300)
 
     if not result.success:
+        if "no templates" in (result.stderr or "").lower():
+            return (
+                f"## 🧬 Nuclei 漏洞扫描\n"
+                f"**目标:** `{params.target}`\n\n"
+                f"> ❌ 未找到 nuclei 模板。请在 Kali 上运行：\n"
+                f"> ```bash\n> nuclei -ut\n> ```\n"
+                f"> 这会从 GitHub 下载 3000+ 社区模板到 `~/nuclei-templates/`。"
+            )
         return _fmt("Nuclei Scan", params.target, " ".join(cmd), result)
 
     # Parse and deduplicate findings
