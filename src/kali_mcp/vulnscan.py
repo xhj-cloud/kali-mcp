@@ -118,8 +118,10 @@ async def nuclei_scan(params: NucleiInput) -> str:
             bg_args += f" -tags {params.tags}"
         if params.template:
             bg_args += f" -t {params.template}"
+        home = os.path.expanduser("~")
         bg_cmd = (
-            f"cd ~ && HOME=/root nohup nuclei {bg_args} "
+            f"nohup nuclei {bg_args} "
+            f"-templates-dir {home}/nuclei-templates "
             f"-no-color -silent -stats-interval 5 "
             f"> {outfile} 2>&1 &"
         )
