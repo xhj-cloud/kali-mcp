@@ -680,6 +680,7 @@ async def nuclei_results(_params: NucleiResultsInput = None) -> str:
         raw = f.read().strip()
 
     findings = [l.strip() for l in raw.split("\n") if l.strip()
+                and l.strip().startswith("[")
                 and not l.strip().startswith("[INF]")
                 and not l.strip().startswith("[WRN]")
                 and not l.strip().startswith("[FTL]")]
