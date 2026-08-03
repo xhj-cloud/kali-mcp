@@ -126,13 +126,13 @@ async def nuclei_scan(params: NucleiInput) -> str:
     # Limit results count
     # Nuclei doesn't have a built-in limit; we'll truncate after capture
 
-    result = await executor.run(cmd, timeout=300)
+    result = await executor.run(cmd, timeout=60)
 
     # Auto-download templates on first run, then retry
     if not result.success and "no templates" in (result.stderr or "").lower():
         dl = await executor.run(["nuclei", "-ut", "-silent"], timeout=180)
         if dl.success:
-            result = await executor.run(cmd, timeout=300)
+            result = await executor.run(cmd, timeout=60)
 
 
     if not result.success:
