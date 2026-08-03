@@ -501,20 +501,19 @@ async def snmpenum_scan(params: SnmpenumInput) -> str:
     """SNMP enumeration — extract system info, users, processes, network data.
 
     If a device has SNMP enabled with a guessable community string (public,
-    private, etc.), this tool can extract extensive information:
+    private, etc.), this tool can extract extensive information using snmpwalk:
     - System: hostname, OS, uptime, contact, location
-    - Users: logged-in accounts
-    - Processes: running software and versions
-    - Network: interfaces, IP addresses, routing table
+    - Network: interfaces, IP addresses, MACs, routing table
     - Storage: disk partitions and usage
+    - Processes: running software and versions
 
     Common targets: routers, switches, printers, NAS devices, IP cameras.
 
-    Requires: snmp-check (sudo apt install snmp-check -y)
+    Requires: snmpwalk (sudo apt install snmp -y)
     """
     executor = get_executor(timeout=120)
 
-    # First, test SNMP reachability
+    # 1. Test SNMP reachability
     test_cmd = [
         "snmpwalk", "-v2c", "-c", params.community,
         "-t", "3", "-r", "1",
@@ -539,148 +538,75 @@ async def snmpenum_scan(params: SnmpenumInput) -> str:
     if m:
         hostname = m.group(1)
 
-    # Run snmp-check for comprehensive enumeration
-    if params.mode == "quick":
-        # Quick mode: just snmpwalk key OIDs
-        oids = {
-            "sysDescr": "1.3.6.1.2.1.1.1.0",
-            "sysObjectID": "1.3.6.1.2.1.1.2.0",
-            "sysUpTime": "1.3.6.1.2.1.1.3.0",
-            "sysContact": "1.3.6.1.2.1.1.4.0",
-            "sysName": "1.3.6.1.2.1.1.5.0",
-            "sysLocation": "1.3.6.1.2.1.1.6.0",
-            "sysServices": "1.3.6.1.2.1.1.7.0",
-        }
+    # 2. Define OID groups for enumeration
+    oid_groups: list[tuple[str, str, str]] = [
+        # (section_name, oid, label)
+        ("系统信息", "1.3.6.1.2.1.1.1.0", "描述"),
+        ("系统信息", "1.3.6.1.2.1.1.5.0", "主机名"),
+        ("系统信息", "1.3.6.1.2.1.1.3.0", "运行时间"),
+        ("系统信息", "1.3.6.1.2.1.1.4.0", "联系人"),
+        ("系统信息", "1.3.6.1.2.1.1.6.0", "位置"),
+        ("系统信息", "1.3.6.1.2.1.1.7.0", "服务层"),
+    ]
 
-        lines = [
-            f"## 📡 SNMP 快速枚举 — {hostname}",
-            f"**IP:** `{params.target}` | **社群:** `{params.community}`",
-            "",
-            "| 字段 | 值 |",
-            "|------|------|",
-        ]
+    if params.mode == "full":
+        oid_groups.extend([
+            ("网络接口", "1.3.6.1.2.1.2.2.1.2", "接口名称"),
+            ("网络接口", "1.3.6.1.2.1.4.20.1.1", "IP地址"),
+            ("网络接口", "1.3.6.1.2.1.2.2.1.6", "MAC地址"),
+            ("路由表", "1.3.6.1.2.1.4.21.1.1", "目标网络"),
+            ("路由表", "1.3.6.1.2.1.4.21.1.7", "下一跳"),
+            ("ARP表", "1.3.6.1.2.1.4.22.1.2", "IP-MAC映射"),
+            ("进程", "1.3.6.1.2.1.25.4.2.1.2", "进程名"),
+            ("TCP连接", "1.3.6.1.2.1.6.13.1.3", "TCP端口"),
+            ("UDP监听", "1.3.6.1.2.1.7.5.1.2", "UDP端口"),
+            ("存储", "1.3.6.1.2.1.25.2.3.1.3", "存储设备"),
+            ("存储", "1.3.6.1.2.1.25.2.3.1.5", "总大小"),
+            ("存储", "1.3.6.1.2.1.25.2.3.1.6", "已用"),
+        ])
 
-        for label, oid in oids.items():
-            r = await executor.run(
-                ["snmpwalk", "-v2c", "-c", params.community, "-t", "3", "-r", "1",
-                 params.target, oid],
-                timeout=8,
-            )
-            m_val = re.search(r'=\s*(.+)$', r.stdout) if r.success else None
-            value = m_val.group(1).strip() if m_val else "(no response)"
-            if len(value) > 80:
-                value = value[:77] + "..."
-            lines.append(f"| {label} | {value} |")
+    # 3. Walk each OID
+    sections: dict[str, list[str]] = {}
+    for section, oid, label in oid_groups:
+        r = await executor.run(
+            ["snmpwalk", "-v2c", "-c", params.community,
+             "-t", "3", "-r", "1", params.target, oid],
+            timeout=8,
+        )
+        if r.success and r.stdout.strip():
+            if section not in sections:
+                sections[section] = []
+            count = len(r.stdout.strip().split("\n"))
+            if count == 1:
+                m_val = re.search(r'=\s*(.+)$', r.stdout.strip())
+                val = m_val.group(1).strip()[:100] if m_val else r.stdout.strip()[:100]
+                sections[section].append(f"**{label}:** {val}")
+            else:
+                header = f"**{label}** ({count} 条)"
+                sections[section].append(header)
+                for line in r.stdout.strip().split("\n")[:15]:
+                    m_val = re.search(r'=\s*(.+)$', line.strip())
+                    if m_val:
+                        sections[section].append(f"  → {m_val.group(1).strip()[:80]}")
 
-        return "\n".join(lines)
-
-    # Full mode: snmp-check
-    cmd = ["snmp-check", "-c", params.community, "-t", params.target]
-    result = await executor.run(cmd, timeout=120)
-
-    if not result.success:
-        # Fallback: try manual snmpwalk of important OIDs
-        return await _snmp_manual_enum(params, hostname)
-
+    # 4. Build output
     lines = [
         f"## 📡 SNMP 枚举 — {hostname}",
-        f"**IP:** `{params.target}` | **社群:** `{params.community}`",
-        "",
-    ]
-
-    # Parse snmp-check output into sections
-    current_section = ""
-    section_lines: dict[str, list[str]] = {}
-
-    for line in result.stdout.split("\n"):
-        line = line.strip()
-        if not line:
-            continue
-        # snmp-check section headers are like "System information" or "User accounts"
-        if re.match(r"^[A-Z][a-z]", line) and not line.startswith(" "):
-            current_section = line
-            section_lines[current_section] = []
-        elif current_section:
-            section_lines[current_section].append(line)
-
-    for section, entries in section_lines.items():
-        if entries:
-            lines.append(f"### {section}")
-            # Limit each section
-            for entry in entries[:25]:
-                lines.append(f"- {entry}")
-            if len(entries) > 25:
-                lines.append(f"  ... ({len(entries) - 25} more)")
-            lines.append("")
-
-    # Also grab network interfaces
-    iface_result = await executor.run(
-        ["snmpwalk", "-v2c", "-c", params.community, "-t", "3", "-r", "1",
-         params.target, "1.3.6.1.2.1.2.2.1.2"],
-        timeout=15,
-    )
-    if iface_result.success and iface_result.stdout.strip():
-        lines.append("### 网络接口")
-        for line in iface_result.stdout.strip().split("\n")[:20]:
-            m = re.search(r'=\s*STRING:\s*(.+)', line)
-            if m:
-                lines.append(f"- {m.group(1)}")
-        lines.append("")
-
-    return "\n".join(lines) if len(lines) > 2 else "\n".join(lines) + "\n_(snmp-check 输出无法解析，请检查 Kali 上是否安装 snmp-check)_"
-
-
-async def _snmp_manual_enum(params: SnmpenumInput, hostname: str) -> str:
-    """Fallback: manual snmpwalk of common OIDs when snmp-check fails."""
-    executor = get_executor(timeout=60)
-    oid_groups = {
-        "系统信息": [
-            ("1.3.6.1.2.1.1.1.0", "描述"),
-            ("1.3.6.1.2.1.1.5.0", "主机名"),
-            ("1.3.6.1.2.1.1.3.0", "运行时间"),
-            ("1.3.6.1.2.1.1.4.0", "联系人"),
-            ("1.3.6.1.2.1.1.6.0", "位置"),
-        ],
-        "网络接口": [
-            ("1.3.6.1.2.1.2.2.1.2", "接口名称"),
-            ("1.3.6.1.2.1.4.20.1.1", "IP地址"),
-            ("1.3.6.1.2.1.2.2.1.6", "MAC地址"),
-        ],
-        "路由表": [
-            ("1.3.6.1.2.1.4.21.1.1", "目标网络"),
-            ("1.3.6.1.2.1.4.21.1.7", "下一跳"),
-        ],
-        "进程列表": [
-            ("1.3.6.1.2.1.25.4.2.1.2", "进程名"),
-        ],
-    }
-
-    lines = [
-        f"## 📡 SNMP 手动枚举 — {hostname}",
-        f"**IP:** `{params.target}` | **社群:** `{params.community}`",
+        f"**IP:** `{params.target}` | **社群:** `{params.community}` | **模式:** {params.mode}",
         f"",
-        "> ℹ️ snmp-check 不可用，使用 snmpwalk 回退模式。",
-        "",
     ]
 
-    for group_name, oids in oid_groups.items():
-        lines.append(f"### {group_name}")
-        for oid, label in oids:
-            r = await executor.run(
-                ["snmpwalk", "-v2c", "-c", params.community, "-t", "3", "-r", "1",
-                 params.target, oid],
-                timeout=8,
-            )
-            if r.success and r.stdout.strip():
-                count = len(r.stdout.strip().split("\n"))
-                lines.append(f"- **{label}:** {count} 条记录")
-                if count <= 5:
-                    for entry in r.stdout.strip().split("\n"):
-                        m = re.search(r'=\s*(.+)$', entry)
-                        if m:
-                            val = m.group(1).strip()[:80]
-                            lines.append(f"  - {val}")
-        lines.append("")
+    if not sections:
+        lines.append("> ⚠️ 无法获取 SNMP 数据。设备可能限制了 OID 访问。")
+
+    for section in ["系统信息", "网络接口", "路由表", "ARP表", "存储", "进程", "TCP连接", "UDP监听"]:
+        if section in sections:
+            lines.append(f"### {section}")
+            for entry in sections[section][:30]:
+                lines.append(f"- {entry}")
+            if len(sections[section]) > 30:
+                lines.append(f"  ... ({len(sections[section]) - 30} more)")
+            lines.append("")
 
     return "\n".join(lines)
 
