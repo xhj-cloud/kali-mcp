@@ -276,6 +276,29 @@ curl http://<Kali-IP>:8000/mcp
 
 `snmp-check` 不在 Kali apt 仓库。已改用 `snmpwalk`（`apt install snmp`）替代，无需额外安装。
 
+### 工具数量不对（17 个 vs 42 个）
+
+**现象：** 两台虚拟机工具数不同，一台 17 个，一台 42 个。
+
+**原因：** `.env` 中 `PENTEST_ENABLED` 和 `ATTACK_ENABLED` 为 `false`，渗透和攻击工具未加载。
+
+**对照：**
+
+| 配置 | 工具数 |
+|------|------|
+| 两个都 `false` | 17（14 网络 + 3 监视） |
+| `PENTEST=true` | 29（+7 渗透 + 5 挖洞） |
+| 两个都 `true` | 42（+13 攻击） |
+
+**解决：**
+
+```bash
+# 一键开启全部工具
+sed -i 's/PENTEST_ENABLED=false/PENTEST_ENABLED=true/' .env
+sed -i 's/ATTACK_ENABLED=false/ATTACK_ENABLED=true/' .env
+sudo systemctl restart kali-mcp
+```
+
 ### Nuclei 无模板
 
 ```bash
