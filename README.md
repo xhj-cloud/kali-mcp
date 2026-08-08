@@ -151,6 +151,143 @@ Cherry Studio → 设置 → MCP 服务器 → 添加：
 
 ---
 
+## 🖥️ 虚拟机部署
+
+Kali 部署在 VMware / UTM 虚拟机中时，需要处理网络转发。
+
+### 方案一：桥接模式（推荐）
+
+VM 直接接入物理局域网，获得独立 IP，无需额外转发。
+
+```bash
+# VMware Fusion：设置 → 网络适配器 → 桥接网络 (Autodetect)
+# Kali 中查看 IP
+ip addr show eth0 | grep inet
+```
+
+Cherry Studio 直接连接：`http://<Kali-IP>:8000/mcp`
+
+### 方案二：NAT + socat 端口转发
+
+把 VM 网络的 HTTP 端口映射到宿主机：
+
+```bash
+# 1. 安装 socat
+brew install socat
+
+# 2. VM 网络选「与我的 Mac 共享」(NAT)
+
+# 3. Kali 中查看 NAT IP（通常是 192.168.xxx.128）
+ip addr show eth0 | grep inet
+
+# 4. 启动转发（把 IP 换成实际的）
+socat TCP-LISTEN:8000,fork,reuseaddr TCP:192.168.xxx.128:8000
+```
+
+Cherry Studio 连接：`http://localhost:8000/mcp`
+
+**开机自动转发：**
+
+```bash
+cat > ~/Library/LaunchAgents/com.kali-mcp-forward.plist << 'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple/DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.kali-mcp-forward</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/socat</string>
+        <string>TCP-LISTEN:8000,fork,reuseaddr</string>
+        <string>TCP:KALI_NAT_IP:8000</string>
+    </array>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+</dict>
+</plist>
+PLIST
+
+launchctl load ~/Library/LaunchAgents/com.kali-mcp-forward.plist
+```
+
+### 方案三：双网卡
+
+一张 NAT 上网，一张桥接提供 MCP 服务：
+
+VMware Fusion → 添加设备 → 网络适配器 ×2
+
+| 网卡 | 模式 | 用途 |
+|------|------|------|
+| 网卡 1 | NAT | Kali 访问外网（更新/下载） |
+| 网卡 2 | 桥接 | MCP 直连（192.168.0.x） |
+
+---
+
+## 🔧 常见问题
+
+### 401 Unauthorized — Bearer token required
+
+**现象：** `curl` 返回 401，Cherry Studio 报 OAuth 错误。
+
+**原因：** `.env` 中残留 AUTH_TOKEN 值，或 Cherry Studio 开启了 OAuth 认证。
+
+**解决：**
+
+```bash
+# 清空 token
+sed -i '/^AUTH_TOKEN=/c\AUTH_TOKEN=' /path/to/kali-mcp/.env
+
+# 确认服务读对了 .env 文件
+grep WorkingDirectory /etc/systemd/system/kali-mcp.service
+grep EnvironmentFile /etc/systemd/system/kali-mcp.service
+
+# 重启
+sudo systemctl restart kali-mcp
+
+# 验证（应返回方法错误而非 401）
+curl http://<Kali-IP>:8000/mcp
+```
+
+Cherry Studio 侧：设置 → MCP → Kali 工具箱 → **关闭所有 OAuth / 认证选项**，只保留 URL。
+
+### 404 Not Found
+
+**现象：** `curl http://IP:8000/` 返回 404。
+
+**解释：** MCP 端点路径是 `/mcp`，不是 `/`。正确 URL 必须以 `/mcp` 结尾。
+
+### Connection Refused / Timeout
+
+```bash
+# 1. Kali 上确认 MCP 监听在 0.0.0.0
+ss -tlnp | grep 8000         # 应显示 0.0.0.0:8000，不是 127.0.0.1
+
+# 2. 确认服务运行
+sudo systemctl status kali-mcp
+
+# 3. Mac 端测连通
+ping <Kali-IP>
+curl http://<Kali-IP>:8000/mcp
+```
+
+### 无法定位软件包 snmp-check
+
+`snmp-check` 不在 Kali apt 仓库。已改用 `snmpwalk`（`apt install snmp`）替代，无需额外安装。
+
+### Nuclei 无模板
+
+```bash
+# 首次需下载模板库（~100MB）
+nuclei -ut
+
+# 确认模板位置
+ls ~/nuclei-templates/http/
+```
+
+---
+
 ## 完整工具清单
 
 | # | 工具名 | Kali 命令 | 级别 | 功能 |
