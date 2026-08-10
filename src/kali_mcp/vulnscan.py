@@ -124,7 +124,7 @@ async def nuclei_scan(params: NucleiInput) -> str:
             "nuclei", "-u", params.target,
             "-severity", params.severity,
             "-no-color",
-            "-td", "/home/xhj/.local/nuclei-templates",
+            "-templates-directory", "/home/xhj/.local/nuclei-templates",
             "-stats-interval", "5",
         ]
         if params.tags:
