@@ -147,6 +147,10 @@ ATTACK_PKGS=(
     dsniff
     yersinia
     tshark
+    reaver
+    ettercap-text-only
+    bettercap
+    sslstrip
 )
 
 step "1/6" "Installing system packages (level: ${TOOL_LEVEL})..."
