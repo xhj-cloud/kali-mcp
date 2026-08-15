@@ -58,7 +58,7 @@ class CommandExecutor:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                stdin=asyncio.subprocess.PIPE if input_data else None,
+                stdin=asyncio.subprocess.PIPE,
             )
 
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
