@@ -160,7 +160,7 @@ class NmapInput(BaseModel):
             for arg in v.split():
                 arg_lower = arg.lower()
                 for prefix in dangerous_prefixes:
-                    if arg_lower.startswith(prefix):
+                    if arg_lower.startswith(prefix.lower()):
                         raise ValueError(
                             f"Dangerous nmap flag rejected: {arg}"
                         )
