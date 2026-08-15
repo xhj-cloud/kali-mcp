@@ -124,12 +124,43 @@ TRANSPORT=http
 HTTP_HOST=0.0.0.0
 HTTP_PORT=8000
 AUTH_TOKEN=
-PENTEST_ENABLED=true
-ATTACK_ENABLED=true
+PENTEST_ENABLED=false
+ATTACK_ENABLED=false
 EOF
 ```
 
-### 3. 启动
+### 3. 开启渗透侦察 / 主动攻击模块（重要）
+
+默认只加载 🟢 网络维护工具（17 个）。要使用渗透和攻击工具，**必须显式开启开关**：
+
+```bash
+# 开启 🟡 渗透侦察模块（+12 工具，漏洞扫描/爆破/SNMP 等）
+sed -i 's/^PENTEST_ENABLED=.*/PENTEST_ENABLED=true/' .env
+
+# 开启 🔴 主动攻击模块（+23 工具，SQL注入/中间人/WiFi破解等）
+sed -i 's/^ATTACK_ENABLED=.*/ATTACK_ENABLED=true/' .env
+```
+
+> ⚠️ 主动攻击模块需要**先开启**渗透侦察模块（`PENTEST_ENABLED=true`），否则攻击工具不会加载。
+
+**验证开关：**
+
+```bash
+grep -E "PENTEST_ENABLED|ATTACK_ENABLED" .env
+# 应输出：
+# PENTEST_ENABLED=true
+# ATTACK_ENABLED=true
+```
+
+**工具数量对照：**
+
+| PENTEST | ATTACK | 工具数 |
+|:---:|:---:|:---:|
+| false | false | 17（仅网络维护） |
+| true | false | 29（+渗透侦察） |
+| true | true | 52（+主动攻击） |
+
+### 4. 启动
 
 ```bash
 source .venv/bin/activate
@@ -140,7 +171,7 @@ sudo cp kali-mcp.service /etc/systemd/system/
 sudo systemctl enable --now kali-mcp
 ```
 
-### 4. 修复工具权限
+### 5. 修复工具权限
 
 ```bash
 sudo apt install libcap2-bin -y
@@ -148,7 +179,7 @@ sudo setcap cap_net_raw,cap_net_admin+eip $(which arp-scan)
 sudo setcap cap_net_raw,cap_net_admin+eip $(which tcpdump)
 ```
 
-### 5. 连接 AI 客户端
+### 6. 连接 AI 客户端
 
 Cherry Studio → 设置 → MCP 服务器 → 添加：
 
@@ -318,6 +349,97 @@ nuclei -ut
 ls ~/nuclei-templates/http/
 ```
 
+### WiFi 工具报 "wlan0 不存在"
+
+**原因：** Kali 运行在虚拟机中，没有物理无线网卡。
+
+**解决：** 需要一个支持监听模式的 USB 无线网卡，在 VMware 中直通给 VM：
+
+| 芯片 | 推荐型号 | 价格 |
+|------|----------|------|
+| Atheros AR9271 | TP-Link TL-WN722N v1 | ~¥30 |
+| Ralink RT3070 | Alfa AWUS036NH | ~¥50 |
+| Realtek RTL8812AU | Alfa AWUS036ACH | ~¥100 |
+
+插入后 VMware → 虚拟机设置 → USB 控制器 → 勾选该设备，Kali 内自动识别为 `wlan0`。
+
+### bettercap 报 "caplet not found"
+
+**原因：** bettercap 的 caplet 文件路径与默认不符。
+
+**解决：** 已改用 `-eval` 直接启用模块，不依赖 caplet 文件。升级到最新代码即可：
+
+```bash
+git pull
+sudo systemctl restart kali-mcp
+```
+
+### sslstrip 装不上（命令不存在）
+
+**原因：** sslstrip 是 Python2 时代工具，新版 Kali 已从源移除。
+
+**解决：** 无需安装。`sslstrip_run` 工具会自动回退到 bettercap 的 `http.proxy.sslstrip` 模块（功能等价且更强大）：
+
+```bash
+# 只装 bettercap 即可
+sudo apt install -y bettercap
+```
+
+### Cherry Studio 突然连不上 MCP
+
+**原因：** Kali 的 DHCP IP 漂移了（比如 `192.168.0.19` 变成 `192.168.0.233`）。
+
+**解决：**
+
+```bash
+# Kali 上查看当前 IP
+ip addr show eth0 | grep inet
+
+# 方案一：Cherry Studio 里更新 URL 为新 IP
+# 方案二：给 Kali 设静态 IP（推荐，一劳永逸）
+sudo nmcli connection modify "有线连接 1" \
+  ipv4.method manual \
+  ipv4.addresses 192.168.0.233/24 \
+  ipv4.gateway 192.168.0.1 \
+  ipv4.dns "192.168.0.1 8.8.8.8"
+sudo nmcli connection up "有线连接 1"
+```
+
+---
+
+## 实战教程
+
+### 📡 WiFi 破解流程（WPA/WPA2）
+
+```
+1. airmon_start wlan0          → 切换到监听模式（得到 wlan0mon）
+2. airodump_scan wlan0mon       → 扫描附近 WiFi + 抓握手包（设 write_prefix）
+3. aireplay_deauth wlan0mon     → 发送 deauth 包强制客户端重连
+4. aircrack_wpa capture.cap     → 离线字典爆破密码
+5. airmon_stop wlan0mon         → 恢复正常模式
+```
+
+### 🎭 中间人攻击流程
+
+```
+1. arpspoof_mitm 192.168.0.x   → ARP 双向欺骗 + 开启 IP 转发
+2. packet_sniff eth0           → 嗅探目标明文流量（HTTP 凭据/Cookie）
+3. 或 ettercap_mitm            → 自动 ARP 投毒 + 协议嗅探
+4. 或 bettercap_mitm           → HTTP 代理 + 现代凭据捕获
+5. 或 sslstrip_run             → SSL 剥离（HTTPS→HTTP）
+6. arpspoof_mitm_stop          → 停止攻击 + 关闭 IP 转发
+```
+
+### 🎯 SQL 注入完整攻击链
+
+```
+1. sqlmap_scan url action=detect        → 检测注入点
+2. sqlmap_scan url action=dbs           → 枚举所有数据库
+3. sqlmap_scan url action=tables        → 枚举数据表
+4. sqlmap_scan url action=dump table=users → 导出指定表数据
+5. sqlmap_scan url action=os_shell      → 尝试获取系统 shell
+```
+
 ---
 
 ## 完整工具清单
@@ -399,6 +521,7 @@ ATTACK_ENABLED=true  ──→ 🔴 攻击工具    (需二次开关)
 | `AUTH_TOKEN` | 空 | Bearer Token，局域网留空 |
 | `PENTEST_ENABLED` | `false` | 渗透侦察模块 |
 | `ATTACK_ENABLED` | `false` | 主动攻击模块 |
+| `NUCLEI_TEMPLATES_DIR` | 空(自动探测) | nuclei 模板目录，模板在非默认位置时设置（如 `/home/xhj/.local/nuclei-templates`） |
 | `DEFAULT_TIMEOUT` | `120` | 命令超时(秒) |
 
 ---
