@@ -22,6 +22,55 @@ from pydantic import BaseModel, Field, field_validator
 from kali_mcp.executor import get_executor
 from kali_mcp.tools import _fmt, _no_shell_meta, _is_valid_target, _is_valid_domain
 
+# ---------------------------------------------------------------------------
+# Nuclei templates directory resolution
+# ---------------------------------------------------------------------------
+
+#: Env var that overrides automatic nuclei templates directory detection.
+#: Set it in .env (or the systemd unit) when templates live somewhere
+#: non-standard, e.g. NUCLEI_TEMPLATES_DIR=/home/xhj/.local/nuclei-templates
+NUCLEI_TEMPLATES_DIR_ENV = "NUCLEI_TEMPLATES_DIR"
+
+#: Candidate locations probed (in order) when $NUCLEI_TEMPLATES_DIR is unset.
+#: Covers both the `nuclei -ut` default (~/nuclei-templates) and the
+#: nuclei v3 XDG default (~/.local/nuclei-templates), plus the equivalent
+#: paths under /root for servers running as root (kali-mcp.service).
+_DEFAULT_TEMPLATES_CANDIDATES = (
+    "~/nuclei-templates",
+    "~/.local/nuclei-templates",
+    "/root/nuclei-templates",
+    "/root/.local/nuclei-templates",
+)
+
+
+def _resolve_templates_dir() -> str | None:
+    """Locate the nuclei templates directory.
+
+    Priority:
+      1. ``$NUCLEI_TEMPLATES_DIR`` if set and the directory exists
+         (explicit user override — authoritative)
+      2. First candidate path that exists under the current HOME
+      3. First candidate path under /root (root-run servers)
+
+    Returns ``None`` when nothing can be located. Callers should then
+    trigger ``nuclei -ut`` to download templates, and only pass the
+    ``-templates-directory`` flag when a real directory was found —
+    pointing nuclei at a wrong path is worse than letting it decide.
+    """
+    import os
+
+    override = os.environ.get(NUCLEI_TEMPLATES_DIR_ENV, "").strip()
+    if override:
+        # Explicit override is authoritative: never silently fall back
+        # to another path if the user set it but it is wrong/missing.
+        return override if os.path.isdir(override) else None
+
+    for cand in _DEFAULT_TEMPLATES_CANDIDATES:
+        path = os.path.expanduser(cand)
+        if os.path.isdir(path):
+            return path
+    return None
+
 
 # ===================================================================
 # 1. Nuclei — Template-based vulnerability scanner
@@ -113,20 +162,24 @@ async def nuclei_scan(params: NucleiInput) -> str:
         outfile = os.path.expanduser("~/.kali-mcp/nuclei_results.txt")
         os.makedirs(os.path.dirname(outfile), exist_ok=True)
 
-        # Ensure templates exist
-        home = os.path.expanduser("~")
-        tpl_dir = os.path.join(home, "nuclei-templates")
-        if not os.path.isdir(tpl_dir):
+        # Resolve templates dir: $NUCLEI_TEMPLATES_DIR → auto-detect.
+        # Download on first run if nothing found, then re-check.
+        tpl_dir = _resolve_templates_dir()
+        if tpl_dir is None:
             await executor.run(["nuclei", "-ut"], timeout=180)
+            tpl_dir = _resolve_templates_dir()
 
         # Build cmd as list (safe, no shell)
         bg_cmd = [
             "nuclei", "-u", params.target,
             "-severity", params.severity,
             "-no-color",
-            "-templates-directory", "/home/xhj/.local/nuclei-templates",
             "-stats-interval", "5",
         ]
+        # Only pin the templates dir when we actually located one;
+        # otherwise let nuclei use its own built-in default.
+        if tpl_dir:
+            bg_cmd.extend(["-templates-directory", tpl_dir])
         if params.tags:
             bg_cmd.extend(["-tags", params.tags])
         if params.template:
@@ -178,9 +231,11 @@ async def nuclei_scan(params: NucleiInput) -> str:
             return (
                 f"## 🧬 Nuclei 漏洞扫描\n"
                 f"**目标:** `{params.target}`\n\n"
-                f"> ❌ 未找到 nuclei 模板。请在 Kali 上运行：\n"
+                f"> ❌ 未找到 nuclei 模板。请先在 Kali 上运行：\n"
                 f"> ```bash\n> nuclei -ut\n> ```\n"
-                f"> 这会从 GitHub 下载 3000+ 社区模板到 `~/nuclei-templates/`。"
+                f"> 这会从 GitHub 下载 3000+ 社区模板。\n"
+                f"> 若模板在非默认位置，可在 .env 里设置 "
+                f"`NUCLEI_TEMPLATES_DIR=/path/to/nuclei-templates`。"
             )
         return _fmt("Nuclei Scan", params.target, " ".join(cmd), result)
 
