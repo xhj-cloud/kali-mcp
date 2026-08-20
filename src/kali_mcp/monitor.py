@@ -661,6 +661,195 @@ async def port_monitor(params: PortMonitorInput) -> str:
 
 
 # ===================================================================
+# Tool 4: Per-Process Bandwidth (nethogs)
+# ===================================================================
+
+
+class NethogsInput(BaseModel):
+    """Input for per-process bandwidth monitoring."""
+
+    interface: str = Field(
+        default="",
+        description="Network interface to monitor (e.g. eth0, wlan0). Empty = auto-detect from routing table.",
+        max_length=32,
+    )
+    top_n: int = Field(
+        default=10,
+        description="Show top N processes by total bandwidth",
+        ge=1,
+        le=50,
+    )
+
+    @field_validator("interface")
+    @classmethod
+    def validate_iface(cls, v: str) -> str:
+        if v:
+            _no_shell_meta(v)
+        return v
+
+
+# nethogs rate format: "34.5MiB/s", "1.2KiB/s", "0.0B/s"
+_NETHOGS_RATE_RE = re.compile(r"^([\d.]+)([KMGTPE]?i?B)/s$")
+# Data row: PID PROGRAM RECV_RATE SENT_RATE [SUM] ...
+_NETHOGS_ROW_RE = re.compile(
+    r"^\s*(\d{1,7})\s+(\S+)\s+([\d.]+\w*/s)\s+([\d.]+\w*/s)"
+)
+
+
+def _rate_to_bps(rate: str) -> float:
+    """Convert a nethogs rate string (e.g. '34.5MiB/s') to bytes/second."""
+    m = _NETHOGS_RATE_RE.match(rate.strip())
+    if not m:
+        return 0.0
+    value = float(m.group(1))
+    unit = m.group(2)
+    mult = {
+        "B": 1, "KiB": 1024, "MiB": 1024**2, "GiB": 1024**3,
+        "TiB": 1024**4, "PiB": 1024**5, "EiB": 1024**6,
+    }
+    return value * mult.get(unit, 1)
+
+
+# nethogs >=0.9 tracemode line: "<program>/<pid>/<flag>\t<recv_kB/s>\t<sent_kB/s>"
+_NETHOGS_TRACE_RE = re.compile(
+    r"^(.*?)/(\d+)/(?:\d+)\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)$"
+)
+
+
+def _fmt_kbs(v: float) -> str:
+    """Format a kB/s rate with adaptive units (B/s below 1 kB/s)."""
+    if v >= 1024:
+        return f"{v / 1024:.1f} MB/s"
+    if v >= 1:
+        return f"{v:.1f} kB/s"
+    return f"{v * 1024:.0f} B/s"
+
+
+def _parse_nethogs_output(stdout: str) -> list[dict]:
+    """Parse nethogs output into per-process entries.
+
+    Handles both the >=0.9 tracemode format
+    ('<program>/<pid>/<flag>\\t<recv_kB/s>\\t<sent_kB/s>') and the classic
+    table format ('PID PROGRAM <recv_rate> <sent_rate>' with unit suffixes).
+    Later refresh frames overwrite earlier ones (keeps latest sample per PID).
+    """
+    procs: dict[int, dict] = {}
+    for line in stdout.split("\n"):
+        m = _NETHOGS_TRACE_RE.match(line)
+        if m:
+            program, pid, recv_s, sent_s = m.group(1), int(m.group(2)), m.group(3), m.group(4)
+            procs[pid] = {
+                "pid": pid,
+                "program": (program or "").strip() or "?",
+                "recv": _fmt_kbs(float(recv_s)),
+                "sent": _fmt_kbs(float(sent_s)),
+                "total_bps": (float(recv_s) + float(sent_s)) * 1024,
+            }
+            continue
+        m = _NETHOGS_ROW_RE.match(line)
+        if m:
+            pid, prog, recv_rate, sent_rate = int(m.group(1)), m.group(2), m.group(3), m.group(4)
+            procs[pid] = {
+                "pid": pid,
+                "program": prog,
+                "recv": recv_rate,
+                "sent": sent_rate,
+                "total_bps": _rate_to_bps(recv_rate) + _rate_to_bps(sent_rate),
+            }
+    return list(procs.values())
+
+
+async def nethogs_bandwidth(params: NethogsInput) -> str:
+    """Show per-process network bandwidth usage on this machine using nethogs.
+
+    Unlike traffic_stats (which sees IP-to-IP flows), nethogs attributes
+    each packet to the PROCESS that sent/received it, answering "which
+    program is eating my bandwidth".
+
+    Takes a short tracemode snapshot (3 refresh cycles, ~3s window) and reports:
+    - Top processes by total bandwidth (receive + send)
+    - Per-process receive/send rates
+    - Raw nethogs output for full detail
+
+    Useful for:
+    - Finding bandwidth hogs on the Kali host itself
+    - Spotting suspicious processes (miners, malware exfiltration)
+    - Verifying which service is generating traffic after a change
+
+    Requires: nethogs (sudo apt install nethogs). Needs root or capabilities:
+      sudo setcap cap_net_admin,cap_net_raw+eip $(which nethogs)
+    """
+    executor = get_executor(timeout=40)
+    now = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
+
+    # 1. Resolve interface (auto-detect from default route if empty)
+    iface = params.interface
+    if not iface:
+        r = await executor.run(["ip", "route", "show", "default"])
+        m = re.search(r"dev\s+(\S+)", r.stdout)
+        iface = m.group(1) if m else "eth0"
+
+    # 2. Tracemode snapshot: 3 refresh cycles (~3s), then exit on its own
+    cmd = ["timeout", "30", "nethogs", "-t", "-c", "3", iface]
+    result = await executor.run(cmd, timeout=40)
+
+    lines = [
+        f"## 🐷 进程级带宽 — {iface}",
+        f"**时间:** {now} | **采样窗口:** ~3s（tracemode ×3）",
+        "",
+    ]
+
+    if not result.success and "not found" in (result.stderr or "").lower():
+        lines.append(
+            "❌ 未安装 nethogs。请执行:\n```\nsudo apt install -y nethogs\n```"
+        )
+        return "\n".join(lines)
+
+    if not result.success and (
+        "operation not permitted" in (result.stderr or "").lower()
+        or "root" in (result.stderr or "").lower()
+    ):
+        lines.append(
+            "⚠️ 权限不足。以 root 运行，或授予能力:\n```\n"
+            "sudo setcap cap_net_admin,cap_net_raw+eip $(which nethogs)\n```"
+        )
+
+    if not result.stdout:
+        diag = f"\n**诊断:** {result.stderr[:500]}" if result.stderr else ""
+        lines.append(f"> ⚠️ 无输出。{diag}")
+        return "\n".join(lines)
+
+    # 3. Parse per-process entries (handles both tracemode and classic formats)
+    procs = [p for p in _parse_nethogs_output(result.stdout) if p["pid"] > 0]
+
+    if procs:
+        procs.sort(key=lambda p: -p["total_bps"])
+        lines.append(f"### 📊 Top {min(params.top_n, len(procs))} 进程（按总带宽）")
+        lines.append("| PID | 进程 | 接收 | 发送 | 合计 |")
+        lines.append("|------|------|------|------|------|")
+        for p in procs[: params.top_n]:
+            if p["total_bps"] >= 1024 * 1024:
+                total = f"{p['total_bps'] / (1024 * 1024):.1f} MiB/s"
+            else:
+                total = f"{p['total_bps'] / 1024:.1f} KiB/s"
+            lines.append(
+                f"| {p['pid']} | {p['program']} | {p['recv']} | {p['sent']} | {total} |"
+            )
+        lines.append("")
+
+    # 4. Raw output for full fidelity (MESSAGE/CURRENT/TOTAL columns)
+    lines.append("### 📋 nethogs 原始输出")
+    lines.append("```")
+    lines.append(result.stdout[:_MAX_OUTPUT])
+    lines.append("```")
+
+    if result.stderr:
+        lines.append(f"\n**诊断:**\n```\n{result.stderr[:500]}\n```")
+
+    return "\n".join(lines)
+
+
+# ===================================================================
 # Registry
 # ===================================================================
 
@@ -668,4 +857,5 @@ MONITOR_TOOLS: dict[str, tuple[callable, type[BaseModel]]] = {
     "network_diff": (network_diff, NetworkDiffInput),
     "traffic_stats": (traffic_stats, TrafficStatsInput),
     "port_monitor": (port_monitor, PortMonitorInput),
+    "nethogs_bandwidth": (nethogs_bandwidth, NethogsInput),
 }

@@ -101,6 +101,7 @@ BASE_PKGS=(
     dnsutils
     whois
     tcpdump
+    nethogs
     curl
     iproute2
     python3
@@ -195,6 +196,7 @@ _set_cap() {
 
 _set_cap tcpdump
 _set_cap arp-scan
+_set_cap nethogs
 
 # ===========================================================================
 # 4. Python venv
