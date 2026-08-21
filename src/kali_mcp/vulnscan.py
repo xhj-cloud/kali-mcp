@@ -8,14 +8,16 @@ Tools:
   2. ffuf_fuzz    — Web fuzzer for hidden directories, params, vhosts
   3. dnsenum_scan — DNS reconnaissance (subdomains, zone transfer)
   4. snmpenum_scan — SNMP enumeration (users, processes, network info)
+  5. ssl_cert_check — SSL/TLS certificate check (expiry/SAN/chain verify)
 
-Requires: nuclei, ffuf, dnsrecon, snmp-check
+Requires: nuclei, ffuf, dnsrecon, snmp-check, openssl
 Install:  sudo apt install nuclei ffuf dnsrecon snmp-check -y
 """
 
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -759,6 +761,194 @@ async def nuclei_results(_params: NucleiResultsInput = None) -> str:
     return result
 
 
+# ===================================================================
+# 6. SSL Certificate Check — openssl s_client + x509 parsing
+# ===================================================================
+
+#: First PEM block in `openssl s_client` output is the leaf certificate.
+_CERT_PEM_RE = re.compile(
+    r"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----", re.DOTALL
+)
+_VERIFY_CODE_RE = re.compile(r"Verify return code:\s*(\d+)\s*\(([^)]*)\)")
+_PROTOCOL_RE = re.compile(r"Protocol\s*:\s*(\S+)")
+
+
+def _extract_cert_pem(sclient_output: str) -> str | None:
+    """Extract the leaf certificate PEM from openssl s_client output."""
+    m = _CERT_PEM_RE.search(sclient_output)
+    if not m:
+        return None
+    body = m.group(1).strip()
+    return f"-----BEGIN CERTIFICATE-----\n{body}\n-----END CERTIFICATE-----"
+
+
+def _parse_openssl_date(value: str) -> datetime | None:
+    """Parse an openssl date like 'May  1 00:00:00 2025 GMT' (UTC-aware)."""
+    value = value.strip()
+    if value.endswith(" GMT"):
+        value = value[:-4].strip()
+    try:
+        return datetime.strptime(value, "%b %d %H:%M:%S %Y").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        return None
+
+
+def _cert_status(not_after: datetime | None, now: datetime) -> tuple[str, int | None]:
+    """Return (status label, days remaining) for a certificate expiry."""
+    if not_after is None:
+        return ("❓ Unknown — could not parse notAfter", None)
+    days = (not_after - now).days
+    if days < 0:
+        return f"🔴 EXPIRED {-days} day(s) ago", days
+    if days < 7:
+        return f"🟠 Expires in {days} day(s)", days
+    if days < 30:
+        return f"🟡 Expires in {days} day(s)", days
+    return f"🟢 Valid — {days} day(s) remaining", days
+
+
+def _parse_x509_summary(x509_out: str) -> dict[str, str]:
+    """Parse `openssl x509 -noout -subject -issuer -dates -ext subjectAltName` output.
+
+    Handles both openssl 3.x (`subject=C = CN`) and legacy (`subject=/C=CN`)
+    formats; the SAN value sits on the line following its header.
+    """
+    info: dict[str, str] = {
+        "subject": "", "issuer": "", "not_before": "", "not_after": "", "sans": ""
+    }
+    lines = x509_out.splitlines()
+    for i, raw in enumerate(lines):
+        line = raw.strip()
+        if line.startswith("subject="):
+            info["subject"] = line.split("=", 1)[1].strip()
+        elif line.startswith("issuer="):
+            info["issuer"] = line.split("=", 1)[1].strip()
+        elif line.startswith("notBefore="):
+            info["not_before"] = line.split("=", 1)[1].strip()
+        elif line.startswith("notAfter="):
+            info["not_after"] = line.split("=", 1)[1].strip()
+        elif "Subject Alternative Name" in line:
+            # Value is on the next non-empty line (indented)
+            for nxt in lines[i + 1:]:
+                if nxt.strip():
+                    info["sans"] = nxt.strip()
+                    break
+    return info
+
+
+class SslCertInput(BaseModel):
+    """Input for SSL certificate checking."""
+
+    host: str = Field(
+        ...,
+        description="Target hostname or IP (e.g. example.com, 192.168.0.1)",
+        min_length=1,
+        max_length=256,
+    )
+    port: int = Field(443, ge=1, le=65535, description="TLS port to connect to")
+
+    @field_validator("host")
+    @classmethod
+    def validate_host(cls, v: str) -> str:
+        _no_shell_meta(v)
+        if not _is_valid_target(v):
+            raise ValueError(f"Invalid host: {v}")
+        return v
+
+
+async def ssl_cert_check(params: SslCertInput) -> str:
+    """Check the SSL/TLS certificate served by a target (read-only).
+
+    Performs a TLS handshake with `openssl s_client`, then parses the leaf
+    certificate to report subject, issuer, SANs, validity window and days
+    remaining. Also reports the negotiated protocol and chain-verification
+    result from OpenSSL itself.
+
+    Useful for:
+    - Expiry monitoring (warns at <30d / <7d, flags expired)
+    - Verifying a domain is actually covered by the certificate (SAN check)
+    - Spotting self-signed or broken chains during recon
+
+    Requires: openssl (pre-installed on Kali). No extra packages.
+    """
+    executor = get_executor(timeout=20)
+    target = f"{params.host}:{params.port}"
+    cmd = [
+        "openssl", "s_client", "-connect", target, "-servername", params.host,
+    ]
+
+    # Empty stdin → s_client exits right after the handshake.
+    r1 = await executor.run(cmd, input_data="")
+    pem = _extract_cert_pem(r1.stdout)
+    if not pem:
+        diag = (r1.stderr or r1.stdout)[:500]
+        return (
+            f"## SSL Certificate Check\n\n**Target:** `{target}`\n\n"
+            f"✗ No certificate received.\n\n"
+            f"**Diagnostics:**\n```\n{diag}\n```\n\n"
+            "Hints: port closed / not a TLS service / connection timed out."
+        )
+
+    r2 = await executor.run(
+        ["openssl", "x509", "-noout", "-subject", "-issuer", "-dates",
+         "-ext", "subjectAltName"],
+        input_data=pem,
+    )
+    info = _parse_x509_summary(r2.stdout)
+
+    not_after = _parse_openssl_date(info["not_after"])
+    now = datetime.now(timezone.utc)
+    status_label, days = _cert_status(not_after, now)
+
+    verify_m = _VERIFY_CODE_RE.search(r1.stdout)
+    if verify_m:
+        code, reason = verify_m.group(1), verify_m.group(2).strip()
+        verify_txt = f"{code} ({reason})" + (" ✓" if code == "0" else " ⚠ chain not trusted")
+    else:
+        verify_txt = "n/a"
+
+    proto_m = _PROTOCOL_RE.search(r1.stdout)
+    protocol = proto_m.group(1) if proto_m else "n/a"
+
+    # SAN coverage check for the requested host (only meaningful for domains)
+    san_note = ""
+    if info["sans"] and re.match(r"^[a-zA-Z0-9]([a-zA-Z0-9\-\.]*[a-zA-Z0-9])?$", params.host):
+        sans_lower = [s.strip().lower() for s in info["sans"].split(",")]
+        covered = any(
+            s == params.host.lower() or s.lstrip("*.") == params.host.lower()
+            for s in sans_lower if not s.startswith("ip address:")
+        )
+        san_note = (
+            f"\n**SAN coverage:** `{params.host}` "
+            + ("✓ is covered by this certificate" if covered else "⚠ NOT found in SANs")
+        )
+
+    lines = [
+        "## SSL Certificate Check",
+        "",
+        f"**Target:** `{target}`",
+        f"**Status:** {status_label}",
+        "",
+        "| Field | Value |",
+        "|---|---|",
+        f"| Subject | {info['subject'] or 'n/a'} |",
+        f"| Issuer | {info['issuer'] or 'n/a'} |",
+        f"| SANs | {info['sans'] or 'none'} |",
+        f"| Not Before | {info['not_before'] or 'n/a'} |",
+        f"| Not After | {info['not_after'] or 'n/a'} |",
+        f"| Days Remaining | {days if days is not None else 'n/a'} |",
+        f"| TLS Protocol | {protocol} |",
+        f"| Chain Verify | {verify_txt} |",
+    ]
+    if san_note:
+        lines.append(san_note)
+    lines += [
+        "",
+        "**Command:** `openssl s_client -connect " + target + "`",
+    ]
+    return "\n".join(lines)
 
 
 # ===================================================================
@@ -771,4 +961,5 @@ VULNSCAN_TOOLS: dict[str, tuple[callable, type[BaseModel]]] = {
     "ffuf_fuzz": (ffuf_fuzz, FfufInput),
     "dnsenum_scan": (dnsenum_scan, DnsenumInput),
     "snmpenum_scan": (snmpenum_scan, SnmpenumInput),
+    "ssl_cert_check": (ssl_cert_check, SslCertInput),
 }

@@ -644,6 +644,95 @@ async def routing_table() -> str:
     return _fmt("Routing Table", "all tables", " ".join(cmd), result)
 
 
+# ---------------------------------------------------------------------------
+# Firewall rules (read-only inspection of nftables / iptables / ufw)
+# ---------------------------------------------------------------------------
+
+#: A line in an `nft list ruleset` output is a rule when it carries a verdict.
+_NFT_VERDICT_RE = re.compile(r"\b(accept|drop|reject)\b")
+#: Chain header lines ("... policy accept;") are not rules — exclude them.
+_NFT_POLICY_RE = re.compile(r"\bpolicy\s+(accept|drop)\b")
+
+
+def _count_nft_rules(ruleset: str) -> int:
+    """Count rule lines in nftables ruleset output (verdict-keyword heuristic)."""
+    count = 0
+    for line in ruleset.splitlines():
+        if _NFT_POLICY_RE.search(line):
+            continue
+        if _NFT_VERDICT_RE.search(line):
+            count += 1
+    return count
+
+
+async def firewall_rules() -> str:
+    """Show active firewall rules on this Kali host (read-only).
+
+    Inspects nftables, iptables (filter + nat tables) and ufw to report
+    every rule currently in effect. Useful for:
+    - Auditing what traffic is allowed/dropped
+    - Verifying rules left behind by MITM tools (ettercap/sslstrip)
+    - Troubleshooting "why can't I reach port X"
+
+    Requires: nftables / iptables (pre-installed on Kali); ufw optional.
+    """
+    executor = get_executor(timeout=15)
+    sections: list[tuple[str, str, int]] = []  # (title, raw output, rule count)
+
+    # --- nftables (modern default backend) ---
+    r_nft = await executor.run(["nft", "list", "ruleset"])
+    if r_nft.success and r_nft.stdout.strip():
+        sections.append(
+            ("nftables (`nft list ruleset`)", r_nft.stdout, _count_nft_rules(r_nft.stdout))
+        )
+
+    # --- iptables (compat layer; also shows nft-backed rules) ---
+    for table in ("filter", "nat"):
+        r = await executor.run(["iptables", "-t", table, "-S"])
+        if r.success and r.stdout.strip():
+            count = sum(1 for line in r.stdout.splitlines() if line.startswith("-A"))
+            sections.append((f"iptables -t {table}", r.stdout, count))
+
+    # --- ufw (optional front-end) ---
+    r_u = await executor.run(["ufw", "status", "verbose"])
+    if r_u.success and r_u.stdout.strip() and "Status: active" in r_u.stdout:
+        sections.append(("ufw (`ufw status verbose`)", r_u.stdout, -1))
+
+    lines = ["## Firewall Rules", ""]
+
+    if not sections:
+        lines.append(
+            "_No firewall output — nftables/iptables may be missing or the "
+            "service lacks CAP_NET_ADMIN._"
+        )
+        return "\n".join(lines)
+
+    total = sum(c for _, _, c in sections if c >= 0)
+    summary_parts = [f"{title.split(' (')[0]}: {c}" + (" rules" if c >= 0 else " active")
+                     for title, _, c in sections]
+    lines.append(f"**Summary:** {' | '.join(summary_parts)}")
+    lines.append("")
+
+    for title, raw, count in sections:
+        lines.append(f"### {title}")
+        lines.append("")
+        if count >= 0 and count == 0:
+            lines.append("_No rules (only default policies)._")
+            lines.append("")
+        lines.append("```")
+        lines.append(raw.strip())
+        lines.append("```")
+        lines.append("")
+
+    if total == 0:
+        lines.append(
+            "**Note:** No active firewall rules — all traffic is allowed by "
+            "default. Check the sections above for default policies."
+        )
+
+    return "\n".join(lines)
+
+
 async def tcpdump_capture(params: TcpdumpInput) -> str:
     """Capture and analyze live network packets using tcpdump.
 
@@ -1202,6 +1291,7 @@ TOOL_REGISTRY: dict[str, tuple[callable, type[BaseModel]]] = {
     "network_connections": (network_connections, NetConnsInput),
     "network_interfaces": (network_interfaces, None),
     "routing_table": (routing_table, None),
+    "firewall_rules": (firewall_rules, None),
     "tcpdump_capture": (tcpdump_capture, TcpdumpInput),
     "http_request": (http_request, CurlInput),
     "network_topology": (network_topology, TopologyInput),

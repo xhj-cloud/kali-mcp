@@ -1,11 +1,11 @@
 # 🔍 Kali MCP Server
 
-> 将 Kali Linux 变成你的 AI 网络助手 —— 53 个工具，从网络维护到漏洞挖掘，对话即操作。
+> 将 Kali Linux 变成你的 AI 网络助手 —— 56 个工具，从网络维护到漏洞挖掘，对话即操作。
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
 [![FastMCP](https://img.shields.io/badge/FastMCP-3.4+-green.svg)](https://gofastmcp.com)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tools](https://img.shields.io/badge/Tools-53-orange.svg)]()
+[![Tools](https://img.shields.io/badge/Tools-56-orange.svg)]()
 
 ---
 
@@ -25,7 +25,7 @@
 
 在 Cherry Studio / Claude Desktop 对话中直接：
 
-### 🟢 网络维护（18 工具，默认）
+### 🟢 网络维护（19 工具，默认）
 
 | 场景 | 对话示例 |
 |------|----------|
@@ -43,10 +43,11 @@
 | 连接查看 | "Kali 上现在有哪些服务在监听" |
 | 网卡状态 | "查看所有网卡 IP 和流量统计" |
 | 路由表 | "检查默认网关和路由策略" |
+| 防火墙规则 | "看看现在 iptables/nftables 里有哪些防火墙规则" |
 | 抓包分析 | "抓取 eth0 上 100 个 HTTP 数据包" |
 | HTTP 测试 | "用 curl 请求 https://httpbin.org/ip" |
 
-### 🟡 渗透侦察（12 工具，`PENTEST_ENABLED=true`）
+### 🟡 渗透侦察（14 工具，`PENTEST_ENABLED=true`）
 
 | 场景 | 对话示例 |
 |------|----------|
@@ -61,6 +62,8 @@
 | 技术识别 | "识别 http://192.168.0.1 用了什么 Web 技术" |
 | 漏洞搜索 | "searchsploit 搜一下 OpenSSH 7.0 的漏洞" |
 | 密码爆破 | "用 rockyou 字典爆破 192.168.0.x 的 SSH" |
+| SSL 证书检查 | "查一下 example.com 的证书什么时候过期、SAN 覆盖哪些域名" |
+| HTTP 压测 | "对 http://target 发 1000 个请求（并发 10）看看 QPS 和延迟分布" |
 
 ### 🔴 主动攻击（23 工具，额外 `ATTACK_ENABLED=true`）
 
@@ -95,8 +98,8 @@
 │  Cherry Studio    │ ────── :8000/mcp ──────────→ │  Kali MCP Server         │
 │  Claude Desktop   │                              │  (FastMCP 3.x)           │
 └──────────────────┘                              ├──────────────────────────┤
-                                                   │ 🟢 18 网络维护 (默认)    │
-                                                   │ 🟡 12 渗透侦察 (可开关)  │
+                                                   │ 🟢 19 网络维护 (默认)    │
+                                                   │ 🟡 14 渗透侦察 (可开关)  │
                                                    │ 🔴 23 主动攻击 (可开关)   │
                                                    └──────────────────────────┘
 ```
@@ -132,10 +135,10 @@ EOF
 
 ### 3. 开启渗透侦察 / 主动攻击模块（重要）
 
-默认只加载 🟢 网络维护工具（18 个）。要使用渗透和攻击工具，**必须显式开启开关**：
+默认只加载 🟢 网络维护工具（19 个）。要使用渗透和攻击工具，**必须显式开启开关**：
 
 ```bash
-# 开启 🟡 渗透侦察模块（+12 工具，漏洞扫描/爆破/SNMP 等）
+# 开启 🟡 渗透侦察模块（+14 工具，漏洞扫描/爆破/SNMP/证书检查等）
 sed -i 's/^PENTEST_ENABLED=.*/PENTEST_ENABLED=true/' .env
 
 # 开启 🔴 主动攻击模块（+23 工具，SQL注入/中间人/WiFi破解等）
@@ -157,9 +160,9 @@ grep -E "PENTEST_ENABLED|ATTACK_ENABLED" .env
 
 | PENTEST | ATTACK | 工具数 |
 |:---:|:---:|:---:|
-| false | false | 18（仅网络维护） |
-| true | false | 30（+渗透侦察） |
-| true | true | 53（+主动攻击） |
+| false | false | 19（仅网络维护） |
+| true | false | 33（+渗透侦察） |
+| true | true | 56（+主动攻击） |
 
 ### 4. 启动
 
@@ -318,9 +321,9 @@ curl http://<Kali-IP>:8000/mcp
 
 `snmp-check` 不在 Kali apt 仓库。已改用 `snmpwalk`（`apt install snmp`）替代，无需额外安装。
 
-### 工具数量不对（18 个 vs 53 个）
+### 工具数量不对（19 个 vs 56 个）
 
-**现象：** 两台虚拟机工具数不同，一台 18 个，一台 53 个。
+**现象：** 两台虚拟机工具数不同，一台 19 个，一台 56 个。
 
 **原因：** `.env` 中 `PENTEST_ENABLED` 和 `ATTACK_ENABLED` 为 `false`，渗透和攻击工具未加载。
 
@@ -328,9 +331,9 @@ curl http://<Kali-IP>:8000/mcp
 
 | 配置 | 工具数 |
 |------|------|
-| 两个都 `false` | 18（14 网络 + 4 监视） |
-| `PENTEST=true` | 30（+7 渗透 + 5 挖洞） |
-| 两个都 `true` | 53（+23 攻击） |
+| 两个都 `false` | 19（15 网络 + 4 监视） |
+| `PENTEST=true` | 33（+8 渗透 + 6 挖洞） |
+| 两个都 `true` | 56（+23 攻击） |
 
 **解决：**
 
@@ -466,41 +469,44 @@ sudo nmcli connection up "有线连接 1"
 | 16 | `network_topology` | arp-scan | 🟢 | ARP 网络拓扑图（Mermaid） |
 | 17 | `snmp_topology` | snmpwalk/arp-scan | 🟢 | SNMP 精确拓扑（回退 ARP） |
 | 18 | `nethogs_bandwidth` | nethogs | 🟢 | 进程级带宽（哪个程序在吃流量） |
-| 19 | `nuclei_scan` | nuclei | 🟡 | 模板化漏洞扫描 (3000+ CVE) |
-| 20 | `nuclei_results` | cat | 🟡 | 读取后台 nuclei 扫描结果 |
-| 21 | `ffuf_fuzz` | ffuf | 🟡 | Web 模糊测试 (目录/参数/虚拟主机) |
-| 22 | `dnsenum_scan` | dnsrecon | 🟡 | DNS 侦察 (子域名/域传送) |
-| 23 | `snmpenum_scan` | snmpwalk | 🟡 | SNMP 枚举 (系统/用户/进程/网络) |
-| 24 | `nmap_vuln_scan` | nmap --script | 🟡 | CVE 漏洞 + 广播发现 |
-| 25 | `searchsploit` | searchsploit | 🟡 | Exploit-DB 离线搜索 |
-| 26 | `whatweb_scan` | whatweb | 🟡 | Web 技术栈指纹 |
-| 27 | `nikto_scan` | nikto | 🟡 | Web 漏洞扫描 (6700+ 规则) |
-| 28 | `gobuster_dir` | gobuster | 🟡 | Web 目录/文件爆破 |
-| 29 | `enum4linux_scan` | enum4linux | 🟡 | SMB 用户/共享/OS 枚举 |
-| 30 | `hydra_brute` | hydra | 🟡 | 服务密码爆破 |
-| 31 | `sqlmap_scan` | sqlmap | 🔴 | SQL 注入检测与利用 |
-| 32 | `wpscan_scan` | wpscan | 🔴 | WordPress 漏洞+用户枚举 |
-| 33 | `msfvenom_gen` | msfvenom | 🔴 | Payload 生成 (不执行) |
-| 34 | `nc_operate` | netcat | 🔴 | TCP 监听/连接/端口扫描 |
-| 35 | `responder_run` | responder | 🔴 | NTLM 哈希捕获/投毒 |
-| 36 | `crackmapexec_run` | crackmapexec | 🔴 | SMB/WinRM/MSSQL 攻击 |
-| 37 | `airodump_scan` | airodump-ng | 🔴 | WiFi 扫描 + 握手包捕获 |
-| 38 | `airmon_start` | airmon-ng start | 🔴 | 网卡切换监听模式 |
-| 39 | `airmon_stop` | airmon-ng stop | 🔴 | 网卡恢复管理模式 |
-| 40 | `aireplay_deauth` | aireplay-ng | 🔴 | 取消认证攻击（强制握手包） |
-| 41 | `aircrack_wpa` | aircrack-ng | 🔴 | WPA/WPA2 握手包密码破解 |
-| 42 | `wash_scan` | wash | 🔴 | WPS 路由器发现 |
-| 43 | `john_crack` | john | 🔴 | 密码哈希离线破解 |
-| 44 | `arpspoof_disconnect` | arpspoof | 🔴 | ARP 欺骗永久踢人下线 |
-| 45 | `arpspoof_stop` | kill | 🔴 | 恢复被踢设备网络 |
-| 46 | `dhcp_flood` | yersinia | 🔴 | DHCP 泛洪耗尽 IP 池 |
-| 47 | `ddos_attack` | hping3/slowloris | 🔴 | DDoS/洪泛攻击 (5 模式) |
-| 48 | `packet_sniff` | tcpdump/tshark | 🔴 | 高级抓包 + 流量分析 |
-| 49 | `arpspoof_mitm` | arpspoof | 🔴 | ARP 中间人（IP 转发 + 双向欺骗） |
-| 50 | `arpspoof_mitm_stop` | kill | 🔴 | 停止中间人攻击 + 关闭 IP 转发 |
-| 51 | `ettercap_mitm` | ettercap | 🔴 | Ettercap ARP 投毒 + 协议嗅探 |
-| 52 | `bettercap_mitm` | bettercap | 🔴 | Bettercap HTTP/HTTPS 中间人 |
-| 53 | `sslstrip_run` | sslstrip | 🔴 | SSL 剥离攻击（HTTPS→HTTP） |
+| 19 | `firewall_rules` | nft/iptables | 🟢 | 防火墙规则查看（只读审计） |
+| 20 | `nuclei_scan` | nuclei | 🟡 | 模板化漏洞扫描 (3000+ CVE) |
+| 21 | `nuclei_results` | cat | 🟡 | 读取后台 nuclei 扫描结果 |
+| 22 | `ffuf_fuzz` | ffuf | 🟡 | Web 模糊测试 (目录/参数/虚拟主机) |
+| 23 | `dnsenum_scan` | dnsrecon | 🟡 | DNS 侦察 (子域名/域传送) |
+| 24 | `snmpenum_scan` | snmpwalk | 🟡 | SNMP 枚举 (系统/用户/进程/网络) |
+| 25 | `nmap_vuln_scan` | nmap --script | 🟡 | CVE 漏洞 + 广播发现 |
+| 26 | `searchsploit` | searchsploit | 🟡 | Exploit-DB 离线搜索 |
+| 27 | `whatweb_scan` | whatweb | 🟡 | Web 技术栈指纹 |
+| 28 | `nikto_scan` | nikto | 🟡 | Web 漏洞扫描 (6700+ 规则) |
+| 29 | `gobuster_dir` | gobuster | 🟡 | Web 目录/文件爆破 |
+| 30 | `enum4linux_scan` | enum4linux | 🟡 | SMB 用户/共享/OS 枚举 |
+| 31 | `hydra_brute` | hydra | 🟡 | 服务密码爆破 |
+| 32 | `ssl_cert_check` | openssl s_client | 🟡 | SSL 证书检查（有效期/SAN/链验证） |
+| 33 | `http_load_test` | ab | 🟡 | HTTP 压测（QPS/延迟分位，有上限） |
+| 34 | `sqlmap_scan` | sqlmap | 🔴 | SQL 注入检测与利用 |
+| 35 | `wpscan_scan` | wpscan | 🔴 | WordPress 漏洞+用户枚举 |
+| 36 | `msfvenom_gen` | msfvenom | 🔴 | Payload 生成 (不执行) |
+| 37 | `nc_operate` | netcat | 🔴 | TCP 监听/连接/端口扫描 |
+| 38 | `responder_run` | responder | 🔴 | NTLM 哈希捕获/投毒 |
+| 39 | `crackmapexec_run` | crackmapexec | 🔴 | SMB/WinRM/MSSQL 攻击 |
+| 40 | `airodump_scan` | airodump-ng | 🔴 | WiFi 扫描 + 握手包捕获 |
+| 41 | `airmon_start` | airmon-ng start | 🔴 | 网卡切换监听模式 |
+| 42 | `airmon_stop` | airmon-ng stop | 🔴 | 网卡恢复管理模式 |
+| 43 | `aireplay_deauth` | aireplay-ng | 🔴 | 取消认证攻击（强制握手包） |
+| 44 | `aircrack_wpa` | aircrack-ng | 🔴 | WPA/WPA2 握手包密码破解 |
+| 45 | `wash_scan` | wash | 🔴 | WPS 路由器发现 |
+| 46 | `john_crack` | john | 🔴 | 密码哈希离线破解 |
+| 47 | `arpspoof_disconnect` | arpspoof | 🔴 | ARP 欺骗永久踢人下线 |
+| 48 | `arpspoof_stop` | kill | 🔴 | 恢复被踢设备网络 |
+| 49 | `dhcp_flood` | yersinia | 🔴 | DHCP 泛洪耗尽 IP 池 |
+| 50 | `ddos_attack` | hping3/slowloris | 🔴 | DDoS/洪泛攻击 (5 模式) |
+| 51 | `packet_sniff` | tcpdump/tshark | 🔴 | 高级抓包 + 流量分析 |
+| 52 | `arpspoof_mitm` | arpspoof | 🔴 | ARP 中间人（IP 转发 + 双向欺骗） |
+| 53 | `arpspoof_mitm_stop` | kill | 🔴 | 停止中间人攻击 + 关闭 IP 转发 |
+| 54 | `ettercap_mitm` | ettercap | 🔴 | Ettercap ARP 投毒 + 协议嗅探 |
+| 55 | `bettercap_mitm` | bettercap | 🔴 | Bettercap HTTP/HTTPS 中间人 |
+| 56 | `sslstrip_run` | sslstrip | 🔴 | SSL 剥离攻击（HTTPS→HTTP） |
 
 ---
 

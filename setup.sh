@@ -125,6 +125,7 @@ PENTEST_PKGS=(
     onesixtyone
     seclists
     exploitdb
+    apache2-utils   # ab — http_load_test
 )
 
 # Auto-download nuclei templates (not in apt)
