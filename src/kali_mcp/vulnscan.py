@@ -205,7 +205,10 @@ async def nuclei_scan(params: NucleiInput) -> str:
         "-no-color",
         "-timeout", str(params.timeout_per_template),
         "-stats-interval", "5",
-        "-rl", "10",        # rate limit: 10 req/s
+        # Rate limit 50 req/s: a full severity-filtered run (e.g. ~1764
+        # critical templates) at -rl 10 is rate-bound to >3 min and blows the
+        # sync timeout; measured ~60s scan + startup at -rl 50.
+        "-rl", "50",
         "-bs", "5",         # bulk size
         "-c", "10",         # concurrency
     ]
