@@ -219,13 +219,16 @@ async def nuclei_scan(params: NucleiInput) -> str:
     # nuclei auto-detects its default location (~/.local/share/nuclei/templates).
     # The "no templates" retry below bootstraps `nuclei -ut` on first run.
 
-    result = await executor.run(cmd, timeout=60)
+    # 180s: a full severity-filtered scan (e.g. all ~1700 critical templates)
+    # at -rl 10 legitimately takes minutes; cold starts also pay the cost of
+    # building nuclei's template cache. Use async_mode=True for longer runs.
+    result = await executor.run(cmd, timeout=180)
 
     # Auto-download templates on first run, then retry
     if not result.success and "no templates" in (result.stderr or "").lower():
         dl = await executor.run(["nuclei", "-ut", "-silent"], timeout=180)
         if dl.success:
-            result = await executor.run(cmd, timeout=60)
+            result = await executor.run(cmd, timeout=180)
 
 
     if not result.success:
