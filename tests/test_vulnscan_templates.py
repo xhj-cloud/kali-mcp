@@ -68,6 +68,34 @@ class TestResolveTemplatesDir:
         (tmp_path / "root-tpl").mkdir()
         assert vulnscan._resolve_templates_dir() == str(tmp_path / "root-tpl")
 
+    def test_fallback_v3_xdg_default(self, monkeypatch, tmp_path):
+        # nuclei v3.x `nuclei -ut` downloads to ~/.local/share/nuclei/templates
+        home = tmp_path / "home"
+        (home / ".local" / "share" / "nuclei" / "templates").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        assert vulnscan._resolve_templates_dir() == str(
+            home / ".local" / "share" / "nuclei" / "templates"
+        )
+
+    def test_legacy_priority_over_v3_default(self, monkeypatch, tmp_path):
+        # Legacy ~/nuclei-templates still wins over the v3 XDG default.
+        home = tmp_path / "home"
+        (home / "nuclei-templates").mkdir(parents=True)
+        (home / ".local" / "share" / "nuclei" / "templates").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        assert vulnscan._resolve_templates_dir() == str(home / "nuclei-templates")
+
     def test_none_when_nothing_exists(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+        # Probe only HOME-relative candidates so a real /root template
+        # install (e.g. running pytest as root on Kali) can't leak in.
+        monkeypatch.setattr(
+            vulnscan,
+            "_DEFAULT_TEMPLATES_CANDIDATES",
+            (
+                "~/nuclei-templates",
+                "~/.local/nuclei-templates",
+                "~/.local/share/nuclei/templates",
+            ),
+        )
         assert vulnscan._resolve_templates_dir() is None

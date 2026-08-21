@@ -34,14 +34,17 @@ from kali_mcp.tools import _fmt, _no_shell_meta, _is_valid_target, _is_valid_dom
 NUCLEI_TEMPLATES_DIR_ENV = "NUCLEI_TEMPLATES_DIR"
 
 #: Candidate locations probed (in order) when $NUCLEI_TEMPLATES_DIR is unset.
-#: Covers both the `nuclei -ut` default (~/nuclei-templates) and the
-#: nuclei v3 XDG default (~/.local/nuclei-templates), plus the equivalent
-#: paths under /root for servers running as root (kali-mcp.service).
+#: Covers the legacy `nuclei -ut` location (~/nuclei-templates), the nuclei v3
+#: XDG default (~/.local/share/nuclei/templates — where `nuclei -ut` actually
+#: downloads on v3.x), and the equivalent paths under /root for servers
+#: running as root (kali-mcp.service).
 _DEFAULT_TEMPLATES_CANDIDATES = (
     "~/nuclei-templates",
     "~/.local/nuclei-templates",
+    "~/.local/share/nuclei/templates",
     "/root/nuclei-templates",
     "/root/.local/nuclei-templates",
+    "/root/.local/share/nuclei/templates",
 )
 
 
@@ -213,7 +216,7 @@ async def nuclei_scan(params: NucleiInput) -> str:
         cmd.extend(["-t", params.template])
 
     # Note: no -templates-directory flag (not supported by nuclei v3);
-    # nuclei auto-detects its default location (~/.local/nuclei-templates).
+    # nuclei auto-detects its default location (~/.local/share/nuclei/templates).
     # The "no templates" retry below bootstraps `nuclei -ut` on first run.
 
     result = await executor.run(cmd, timeout=60)
