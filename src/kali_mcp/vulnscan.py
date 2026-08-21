@@ -54,10 +54,10 @@ def _resolve_templates_dir() -> str | None:
       2. First candidate path that exists under the current HOME
       3. First candidate path under /root (root-run servers)
 
-    Returns ``None`` when nothing can be located. Callers should then
-    trigger ``nuclei -ut`` to download templates, and only pass the
-    ``-templates-directory`` flag when a real directory was found —
-    pointing nuclei at a wrong path is worse than letting it decide.
+    Returns ``None`` when nothing can be located. Callers use this as an
+    existence check to decide whether to bootstrap with ``nuclei -ut``;
+    nuclei itself auto-detects its default template location at runtime
+    (no directory flag is passed — nuclei v3 has none).
     """
     import os
 
@@ -164,12 +164,12 @@ async def nuclei_scan(params: NucleiInput) -> str:
         outfile = os.path.expanduser("~/.kali-mcp/nuclei_results.txt")
         os.makedirs(os.path.dirname(outfile), exist_ok=True)
 
-        # Resolve templates dir: $NUCLEI_TEMPLATES_DIR → auto-detect.
-        # Download on first run if nothing found, then re-check.
+        # Bootstrap templates on first run if nothing is installed yet.
+        # (No -templates-directory flag: not supported by nuclei v3 — it
+        # auto-detects its default location after `nuclei -ut`.)
         tpl_dir = _resolve_templates_dir()
         if tpl_dir is None:
             await executor.run(["nuclei", "-ut"], timeout=180)
-            tpl_dir = _resolve_templates_dir()
 
         # Build cmd as list (safe, no shell)
         bg_cmd = [
@@ -178,10 +178,6 @@ async def nuclei_scan(params: NucleiInput) -> str:
             "-no-color",
             "-stats-interval", "5",
         ]
-        # Only pin the templates dir when we actually located one;
-        # otherwise let nuclei use its own built-in default.
-        if tpl_dir:
-            bg_cmd.extend(["-templates-directory", tpl_dir])
         if params.tags:
             bg_cmd.extend(["-tags", params.tags])
         if params.template:
@@ -216,8 +212,9 @@ async def nuclei_scan(params: NucleiInput) -> str:
     if params.template:
         cmd.extend(["-t", params.template])
 
-    # Limit results count
-    # Nuclei doesn't have a built-in limit; we'll truncate after capture
+    # Note: no -templates-directory flag (not supported by nuclei v3);
+    # nuclei auto-detects its default location (~/.local/nuclei-templates).
+    # The "no templates" retry below bootstraps `nuclei -ut` on first run.
 
     result = await executor.run(cmd, timeout=60)
 
