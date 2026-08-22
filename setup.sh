@@ -104,6 +104,9 @@ BASE_PKGS=(
     nethogs
     curl
     iproute2
+    openssl        # ssl_cert_check — s_client/x509 解析（Kali 预装，Debian 需显式安装）
+    nftables       # firewall_rules — `nft list ruleset` 只读审计
+    iptables       # firewall_rules — filter/nat 表规则查看
     python3
     python3-pip
     python3-venv
