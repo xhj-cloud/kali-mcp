@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
 [![FastMCP](https://img.shields.io/badge/FastMCP-3.4+-green.svg)](https://gofastmcp.com)
-[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightblue.svg)](LICENSE)
 [![Tools](https://img.shields.io/badge/Tools-56-orange.svg)]()
 
 ---
@@ -557,3 +557,7 @@ ATTACK_ENABLED=true  ──→ 🔴 攻击工具    (需二次开关)
 ## License
 
 MIT — [LICENSE](LICENSE)
+
+## License / 许可证
+
+本项目采用 [CC BY-NC 4.0](LICENSE)（Creative Commons 署名-非商业性使用 4.0 国际）协议开源：可以自由查看、使用、修改和分发，但**禁止任何商业用途**。
