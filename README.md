@@ -554,10 +554,10 @@ ATTACK_ENABLED=true  ──→ 🔴 攻击工具    (需二次开关)
 
 ---
 
-## License
-
-MIT — [LICENSE](LICENSE)
-
 ## License / 许可证
 
-本项目采用 [CC BY-NC 4.0](LICENSE)（Creative Commons 署名-非商业性使用 4.0 国际）协议开源：可以自由查看、使用、修改和分发，但**禁止任何商业用途**。
+本项目采用 [CC BY-NC 4.0](LICENSE)（Creative Commons 署名-非商业性使用 4.0 国际）协议开源：
+
+- ✅ 可以自由查看、学习、修改和分发
+- ❌ **禁止任何商业用途**
+- 📝 二次分发或改编时，须保留原作者署名及本许可证声明
