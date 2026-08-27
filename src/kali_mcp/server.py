@@ -38,6 +38,7 @@ from fastmcp import FastMCP
 # -- Tools --------------------------------------------------------------------
 from kali_mcp.tools import TOOL_REGISTRY
 from kali_mcp.monitor import MONITOR_TOOLS
+from kali_mcp.ipv6 import IPV6_TOOLS
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -141,6 +142,13 @@ for _name, (_func, _model) in MONITOR_TOOLS.items():
     logger.info("Registered monitor tool: %s", _name)
 
 logger.info("Monitor tools: %d registered", len(MONITOR_TOOLS))
+
+# Register IPv6 tools (always enabled — 🟢 network maintenance)
+for _name, (_func, _model) in IPV6_TOOLS.items():
+    _register_tool_with_model(_name, _func, _model)
+    logger.info("Registered ipv6 tool: %s", _name)
+
+logger.info("IPv6 tools: %d registered", len(IPV6_TOOLS))
 
 # Conditionally register pentest tools
 _pentest_enabled = os.getenv("PENTEST_ENABLED", "").lower() in ("true", "1", "yes")

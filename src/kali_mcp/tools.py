@@ -484,7 +484,8 @@ async def ping_host(params: PingInput) -> str:
     cmd = [
         "ping",
         "-c", str(params.count),
-        "-W", str(params.timeout),
+        # iputils ping 的 -W 单位是毫秒；参数语义是秒，需换算
+        "-W", str(params.timeout * 1000),
         params.target,
     ]
 
