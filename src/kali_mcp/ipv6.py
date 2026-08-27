@@ -49,6 +49,8 @@ def _classify_ipv6(addr: str) -> str:
         ip = ipaddress.IPv6Address(a)
     except ValueError:
         return "unknown"
+    if ip.is_loopback:
+        return "loopback"
     if ip.is_link_local:
         return "link-local"
     if ip.is_private and (a.startswith("fc") or a.startswith("fd")):
@@ -250,7 +252,7 @@ async def ipv6_status() -> str:
     lines = ["## IPv6 状态总览", ""]
 
     # --- parse addresses per interface ---
-    counts = {"global": 0, "ULA": 0, "link-local": 0}
+    counts = {"global": 0, "ULA": 0, "link-local": 0, "loopback": 0}
     iface: str = ""
     addr_rows: list[tuple[str, str, str]] = []
     if r_addr.success:
@@ -271,13 +273,18 @@ async def ipv6_status() -> str:
     if addr_rows:
         lines.append("| 网卡 | 地址 | 类型 |")
         lines.append("|------|------|------|")
-        label = {"global": "🌐 公网", "ULA": "🏠 ULA 内网", "link-local": "🔗 链路本地"}
+        label = {
+            "global": "🌐 公网",
+            "ULA": "🏠 ULA 内网",
+            "link-local": "🔗 链路本地",
+            "loopback": "🔄 回环",
+        }
         for ifn, addr, cls in addr_rows:
             lines.append(f"| {ifn} | `{addr}` | {label.get(cls, cls)} |")
         lines.append("")
         lines.append(
             f"**统计:** 公网 {counts['global']} 个 | ULA 内网 {counts['ULA']} 个 | "
-            f"链路本地 {counts['link-local']} 个"
+            f"链路本地 {counts['link-local']} 个 | 回环 {counts['loopback']} 个"
         )
     else:
         lines.append("_(未发现任何 IPv6 地址 — IPv6 可能被禁用或未配置)_")
@@ -371,8 +378,8 @@ async def ipv6_ping(params: Ipv6PingInput) -> str:
 
     # --- automatic multi-target check ---
     lines = ["## IPv6 连通性自检（公共 DNS）", ""]
-    lines.append("| 服务 | 地址 | 可达 | 丢包率 | 平均延迟 |")
-    lines.append("|------|------|------|--------|----------|")
+    lines.append("| 服务 | 地址 | 可达 | 丢包率 | 平均延迟 | 原因 |")
+    lines.append("|------|------|------|--------|----------|------|")
     reachable = 0
     raw_parts: list[str] = []
     for name, addr in PUBLIC_IPV6_DNS:
@@ -388,10 +395,26 @@ async def ipv6_ping(params: Ipv6PingInput) -> str:
         loss = loss_m.group(1) + "%" if loss_m else "-"
         avg_m = _PING_AVG_RE.search(r.stdout)
         avg = avg_m.group(1) + " ms" if avg_m else "-"
+        # 无路由时 ping 不输出汇总行，从输出/错误中提取原因
+        combined = (r.stdout or "") + (r.stderr or "")
         if ok:
+            reason = ""
             reachable += 1
-        lines.append(f"| {name} | `{addr}` | {'✅' if ok else '❌'} | {loss} | {avg} |")
-        raw_parts.append(f"### {name} ({addr})\n```\n{r.stdout.strip()}\n```")
+        elif "network unreachable" in combined.lower() or "网络不可达" in combined:
+            reason = "无 IPv6 路由（本机没有公网 IPv6）"
+        elif "no route to host" in combined.lower() or "没有到主机的路由" in combined:
+            reason = "No route to host"
+        elif "connection refused" in combined.lower() or "连接被拒" in combined:
+            reason = "Connection refused"
+        elif loss_m:
+            reason = "超时丢包"
+        else:
+            reason = "未知（见原始输出）"
+        lines.append(f"| {name} | `{addr}` | {'✅' if ok else '❌'} | {loss} | {avg} | {reason} |")
+        raw_parts.append(
+            f"### {name} ({addr})\n```\n"
+            f"{(r.stdout or r.stderr or '(无输出)').strip()}\n```"
+        )
 
     lines.append("")
     if reachable == len(PUBLIC_IPV6_DNS):
@@ -453,12 +476,13 @@ async def ipv6_dig(params: Ipv6DigInput) -> str:
 
     Requires: dnsutils/dig（Kali 预装）
     """
-    at = f"@{params.dns_server}" if params.dns_server else ""
+    # 注意：dns_server 为空时不能传空字符串参数，否则 dig 会查询空域名
+    srv = [f"@{params.dns_server}"] if params.dns_server else []
     executor = get_executor(timeout=20)
 
-    cmd6 = ["dig", at, params.domain, "AAAA"]
+    cmd6 = ["dig"] + srv + [params.domain, "AAAA"]
     r6 = await executor.run(cmd6)
-    cmd4 = ["dig", at, params.domain, "A"]
+    cmd4 = ["dig"] + srv + [params.domain, "A"]
     r4 = await executor.run(cmd4)
 
     aaaa = _parse_dig_answers(r6.stdout) if r6.success else []

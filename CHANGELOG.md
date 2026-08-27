@@ -24,6 +24,12 @@
 
 - **`ping_host` 的 `-W` 超时单位 bug**：iputils `ping` 的 `-W` 参数单位是**毫秒**，原代码把"秒"直接传入（默认 5 → 实际 5ms 超时），导致 ping 远端主机几乎必然 100% 丢包、误报不可达。现改为 `timeout * 1000` 毫秒传入。`ipv6_ping` 实现时同步使用了正确的毫秒换算。
 
+### 🐛 部署实测中修复（2026-08-27 当晚，Kali 上线后逐工具实调发现）
+
+- **`::1` 回环地址被误判为"公网"**：导致 `ipv6_status` 虚报"公网 1 个"并误触发"有公网地址但无默认路由"告警。现 `_classify_ipv6` 单独归类 `loopback`，统计与告警逻辑同步修正。
+- **`ipv6_dig` 不指定 DNS 服务器时查询全部失败**：`dns_server` 为空时命令列表里混入空字符串参数（`dig "" baidu.com A`），dig 查询空域名导致 A/AAAA 双双为空。现改为条件拼接 `@server` 参数。
+- **`ipv6_ping` 失败原因列在中文 locale 下显示"未知"**：Kali 中文环境报 `网络不可达` 而非 `network unreachable`。现原因检测兼容中英文。
+
 ### 📝 改动
 
 - `src/kali_mcp/server.py`：注册 `IPV6_TOOLS`（6 个），默认工具数 19 → 25。
@@ -35,8 +41,10 @@
 - `tests/test_ipv6_tools.py`（新增）：48 个用例，覆盖 IPv6 校验、地址分类、dig 解析、nft v6 表提取、输入模型校验、注册表完整性。
 - **测试：133 passed**（原 85 + 新增 48）。
 
-### ⏳ 待办
+### ✅ 部署与验证（2026-08-27 完成）
 
-- Kali 重启后部署：scp 新文件 → 实时目录 `/home/xhj/桌面/kali-mcp` → `sudo systemctl restart kali-mcp` → 验证 25 个默认工具。
+- Kali 上线后按 scp → 实时目录 → `systemctl restart kali-mcp` 流程部署，md5 校验一致。
+- 线上验证：`tools/list` 共 **62 个工具**，6 个 IPv6 工具全部在列。
+- 逐工具实调通过：`ipv6_status`（正确识别本机仅有 Tailscale ULA + 链路本地地址）、`ipv6_ping`（正确报告"无 IPv6 路由"）、`ipv6_dig`（baidu.com A 记录正常、github.com @223.5.5.5 指定 DNS 正常）、`ipv6_neigh`（3 条 STALE 邻居）、`ipv6_firewall`（15 条 v6 规则 + 策略分析）、`ipv6_traceroute`（无路由时干净报错）。
 
 ---

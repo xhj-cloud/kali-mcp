@@ -56,9 +56,9 @@ class TestClassifyIpv6:
     def test_link_local(self):
         assert _classify_ipv6("fe80::1") == "link-local"
 
-    def test_loopback_is_global_bucket(self):
-        # ::1 is not link-local/ULA; falls to global bucket (fine for summary)
-        assert _classify_ipv6("::1") == "global"
+    def test_loopback(self):
+        # ::1 必须单独归类，不能计入"公网"（否则误报有公网地址）
+        assert _classify_ipv6("::1") == "loopback"
 
     def test_garbage(self):
         assert _classify_ipv6("not-an-address") == "unknown"
