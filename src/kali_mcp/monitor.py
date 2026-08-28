@@ -23,6 +23,7 @@ from typing import Optional
 from pydantic import BaseModel, Field, field_validator
 
 from kali_mcp.executor import CommandResult, get_executor
+from kali_mcp.netinfo import detect_default_iface, detect_subnet
 from kali_mcp.tools import (
     _fmt,
     _no_shell_meta,
@@ -107,25 +108,11 @@ async def network_diff(params: NetworkDiffInput) -> str:
 
     Requires: arp-scan (sudo apt install arp-scan)
     """
-    import ipaddress
-
     executor = get_executor(timeout=60)
     now = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
 
-    # 1. Resolve subnet
-    subnet = params.subnet
-    if not subnet:
-        r = await executor.run(["ip", "route", "show", "default"])
-        m = re.search(r"dev\s+(\S+)", r.stdout)
-        iface = m.group(1) if m else "eth0"
-        r2 = await executor.run(["ip", "-4", "addr", "show", iface])
-        m2 = re.search(r"inet\s+(\S+)", r2.stdout)
-        if m2:
-            try:
-                net = ipaddress.IPv4Network(m2.group(1), strict=False)
-                subnet = str(net)
-            except Exception:
-                subnet = "192.168.0.0/24"
+    # 1. Resolve subnet (explicit value wins, else auto-detect)
+    subnet = await detect_subnet(executor, params.subnet)
 
     # 2. Run ARP scan
     arp_cmd = ["arp-scan", subnet]
@@ -783,11 +770,7 @@ async def nethogs_bandwidth(params: NethogsInput) -> str:
     now = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
 
     # 1. Resolve interface (auto-detect from default route if empty)
-    iface = params.interface
-    if not iface:
-        r = await executor.run(["ip", "route", "show", "default"])
-        m = re.search(r"dev\s+(\S+)", r.stdout)
-        iface = m.group(1) if m else "eth0"
+    iface = params.interface or await detect_default_iface(executor)
 
     # 2. Tracemode snapshot: 3 refresh cycles (~3s), then exit on its own
     cmd = ["timeout", "30", "nethogs", "-t", "-c", "3", iface]

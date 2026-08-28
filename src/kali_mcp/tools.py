@@ -12,11 +12,19 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import time
 from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
 
 from kali_mcp.executor import CommandResult, get_executor
+from kali_mcp.netinfo import (
+    arp_class_stats_lines,
+    arp_mermaid_lines,
+    arp_scan_devices,
+    classify_device,
+    detect_subnet,
+)
 
 # ---------------------------------------------------------------------------
 # Validation helpers
@@ -826,8 +834,8 @@ class TopologyInput(BaseModel):
     """Input for network topology mapping."""
 
     subnet: str = Field(
-        default="192.168.0.0/24",
-        description="Subnet to map (e.g. '192.168.0.0/24'). Default: auto-detect from routing table.",
+        default="",
+        description="Subnet to map (e.g. '192.168.0.0/24'). Empty = auto-detect from routing table.",
         max_length=32,
     )
     detail: bool = Field(
@@ -841,44 +849,8 @@ class TopologyInput(BaseModel):
         return v
 
 
-_DEVICE_CLASSES = {
-    "tp-link": ("router", "🌐"),
-    "cisco": ("router", "🌐"),
-    "aruba": ("ap", "📶"),
-    "ubiquiti": ("ap", "📶"),
-    "hikvision": ("camera", "📷"),
-    "uniview": ("camera", "📷"),
-    "dahua": ("camera", "📷"),
-    "vivo": ("phone", "📱"),
-    "samsung": ("phone", "📱"),
-    "apple": ("computer", "💻"),
-    "intel": ("computer", "💻"),
-    "dell": ("computer", "🖥️"),
-    "hewlett": ("computer", "🖥️"),
-    "giga-byte": ("computer", "🖥️"),
-    "vmware": ("vm", "🖳"),
-    "oray.com": ("iot", "🔌"),
-    "espres": ("iot", "🔌"),
-    "fn-link": ("iot", "🔌"),
-    "ai-link": ("iot", "🔌"),
-    "tmall": ("iot", "🔌"),
-    "patria": ("industrial", "🏭"),
-    "ieee": ("industrial", "🏭"),
-    "mobiltex": ("industrial", "🏭"),
-    "h3c": ("network", "🔀"),
-    "new h3c": ("network", "🔀"),
-}
-
-
-def _classify_device(vendor: str) -> tuple[str, str]:
-    """Classify device by vendor name."""
-    vendor_lower = vendor.lower().strip()
-    for key, (dtype, icon) in _DEVICE_CLASSES.items():
-        if key in vendor_lower:
-            return dtype, icon
-    if "locally administered" in vendor_lower or not vendor_lower:
-        return "unknown", "❓"
-    return "unknown", "❓"
+# Device classification (_DEVICE_CLASSES / classify_device) lives in
+# kali_mcp.netinfo — shared with snmp_topology and the monitor tools.
 
 
 async def network_topology(params: TopologyInput) -> str:
@@ -895,107 +867,35 @@ async def network_topology(params: TopologyInput) -> str:
 
     Requires: arp-scan (sudo apt install arp-scan)
     """
-    import re
-    from collections import Counter
-
     executor = get_executor(timeout=60)
 
-    # 1. Auto-detect subnet from routing table if needed
-    subnet = params.subnet
-    if not subnet or subnet == "192.168.0.0/24":
-        r = await executor.run(["ip", "route", "show", "default"])
-        m = re.search(r"dev\s+(\S+)", r.stdout)
-        iface = m.group(1) if m else "eth0"
-        r2 = await executor.run(["ip", "-4", "addr", "show", iface])
-        m2 = re.search(r"inet\s+(\S+)", r2.stdout)
-        if m2:
-            cidr = m2.group(1)
-            try:
-                net = ipaddress.IPv4Network(cidr, strict=False)
-                subnet = str(net)
-            except Exception:
-                pass
+    # 1. Resolve subnet (explicit value wins, else auto-detect)
+    subnet = await detect_subnet(executor, params.subnet)
 
-    # 2. ARP scan
-    cmd = ["arp-scan", subnet]
-    result = await executor.run(cmd, timeout=60)
+    # 2. ARP scan + parse + classify (shared with snmp_topology fallback)
+    t0 = time.monotonic()
+    result, devices = await arp_scan_devices(executor, subnet)
+    elapsed = time.monotonic() - t0
 
     if not result.success:
-        return _fmt("Network Topology", subnet, " ".join(cmd), result)
+        return _fmt("Network Topology", subnet, f"arp-scan {subnet}", result)
 
-    # 3. Parse devices
-    devices = []
-    gateway_ip = None
-    for line in result.stdout.split("\n"):
-        parts = line.strip().split("\t")
-        if len(parts) >= 2:
-            ip = parts[0].strip()
-            mac = parts[1].strip() if len(parts) > 1 else ""
-            vendor = parts[2].strip() if len(parts) > 2 else "Unknown"
-            if ip and re.match(r"\d+\.\d+\.\d+\.\d+$", ip):
-                dclass, icon = _classify_device(vendor)
-                # Heuristic: .1 is usually gateway
-                if ip.endswith(".1") and not gateway_ip:
-                    gateway_ip = ip
-                    dclass, icon = "gateway", "🏠"
-                # TP-Link with .1 is gateway
-                if dclass == "router" and ip.endswith(".1"):
-                    dclass, icon = "gateway", "🏠"
-                devices.append({
-                    "ip": ip, "mac": mac, "vendor": vendor,
-                    "class": dclass, "icon": icon,
-                })
-
-    # 4. Count stats
-    stats = Counter(d["class"] for d in devices)
-    gateways = [d for d in devices if d["class"] == "gateway"]
-    aps = [d for d in devices if d["class"] in ("ap", "router", "network")]
-    others = [d for d in devices if d["class"] not in ("gateway", "ap", "router", "network")]
-
-    # 5. Build Mermaid diagram
-    lines = ["```mermaid", "graph TD"]
-    lines.append('    internet(("🌍 Internet"))')
-
-    for g in gateways:
-        lines.append(f'    internet --- gw_{g["ip"].replace(".","_")}["{g["icon"]} 网关\\n{g["ip"]}"]')
-        gw_id = f'gw_{g["ip"].replace(".","_")}'
-
-    # APs connect to gateway
-    if aps:
-        for ap in aps:
-            lines.append(f'    {gw_id} --- ap_{ap["ip"].replace(".","_")}["{ap["icon"]} {ap["vendor"][:12]}\\n{ap["ip"]}"]')
-
-    # Other devices connect to gateway or nearest AP
-    ap_ids = [f'ap_{ap["ip"].replace(".","_")}' for ap in aps]
-    for i, dev in enumerate(others):
-        node_id = f'dev_{dev["ip"].replace(".","_")}'
-        parent = ap_ids[i % len(ap_ids)] if ap_ids else gw_id
-        label = f'{dev["icon"]} {dev["vendor"][:15] if dev["vendor"] != "Unknown" else "未知设备"}\\n{dev["ip"]}'
-        lines.append(f'    {parent} --- {node_id}["{label}"]')
-
-    lines.append("```")
-
-    # 6. Summary table
+    # 3. Summary (stats + shared Mermaid rendering + device list)
     summary = [
         f"## 🌐 网络拓扑 — {subnet}",
-        f"**设备总数:** {len(devices)} | **扫描耗时:** 2-3s",
+        f"**设备总数:** {len(devices)} | **扫描耗时:** {elapsed:.1f}s",
         "",
         "### 设备分布",
-        "| 类别 | 数量 |",
-        "|------|------|",
+        *arp_class_stats_lines(devices),
+        "",
+        "### 拓扑图",
+        "",
+        *arp_mermaid_lines(devices),
+        "",
+        "### 设备清单",
+        "| IP | MAC | 厂商 | 类型 |",
+        "|------|------|------|------|",
     ]
-    for cls, cnt in stats.most_common():
-        icon = [d["icon"] for d in devices if d["class"] == cls][0] if devices else "?"
-        summary.append(f"| {icon} {cls} | {cnt} |")
-
-    summary.append("")
-    summary.append("### 拓扑图")
-    summary.append("")
-    summary.extend(lines)
-    summary.append("")
-    summary.append("### 设备清单")
-    summary.append("| IP | MAC | 厂商 | 类型 |")
-    summary.append("|------|------|------|------|")
     for d in devices:
         summary.append(f"| {d['ip']} | {d['mac']} | {d['vendor']} | {d['icon']} {d['class']} |")
 
@@ -1046,37 +946,15 @@ async def snmp_topology(params: SnmpTopologyInput) -> str:
 
     Requires: snmpwalk (sudo apt install snmp), arp-scan
     """
-    import re
     from collections import defaultdict
 
     executor = get_executor(timeout=60)
 
-    # 1. Auto-detect subnet
-    subnet = params.subnet
-    if not subnet:
-        r = await executor.run(["ip", "route", "show", "default"])
-        m = re.search(r"dev\s+(\S+)", r.stdout)
-        iface = m.group(1) if m else "eth0"
-        r2 = await executor.run(["ip", "-4", "addr", "show", iface])
-        m2 = re.search(r"inet\s+(\S+)", r2.stdout)
-        if m2:
-            try:
-                net = ipaddress.IPv4Network(m2.group(1), strict=False)
-                subnet = str(net)
-            except Exception:
-                subnet = "192.168.0.0/24"
+    # 1. Resolve subnet (explicit value wins, else auto-detect)
+    subnet = await detect_subnet(executor, params.subnet)
 
-    # 2. ARP scan for all devices
-    arp_result = await executor.run(["arp-scan", subnet], timeout=60)
-    arp_devices = []  # [(ip, mac, vendor)]
-    if arp_result.success:
-        for line in arp_result.stdout.split("\n"):
-            parts = line.strip().split("\t")
-            if len(parts) >= 2 and re.match(r"\d+\.\d+\.\d+\.\d+$", parts[0]):
-                ip = parts[0].strip()
-                mac = parts[1].strip().upper() if len(parts) > 1 else ""
-                vendor = parts[2].strip() if len(parts) > 2 else "Unknown"
-                arp_devices.append((ip, mac, vendor))
+    # 2. ARP scan for all devices (shared parse+classify)
+    _, arp_devices = await arp_scan_devices(executor, subnet)
 
     # 3. Find switches to query
     switch_ips = []
@@ -1084,10 +962,10 @@ async def snmp_topology(params: SnmpTopologyInput) -> str:
         switch_ips = [s.strip() for s in params.switches.split(",") if s.strip()]
     else:
         # Try all TP-Link, H3C, or .1 addresses
-        for ip, mac, vendor in arp_devices:
-            vl = vendor.lower()
+        for d in arp_devices:
+            vl = d["vendor"].lower()
             if any(k in vl for k in ["tp-link", "h3c", "cisco", "aruba", "switch", "ubiquit"]):
-                switch_ips.append(ip)
+                switch_ips.append(d["ip"])
         if not switch_ips:
             # Fallback: try common gateway IPs
             parts = subnet.split(".")[0:3]
@@ -1126,7 +1004,7 @@ async def snmp_topology(params: SnmpTopologyInput) -> str:
                     line,
                 )
                 if m:
-                    mac_hex = ":".join(f"{int(m.group(i)):02X}" for i in range(2, 8))
+                    mac_hex = ":".join(f"{int(m.group(n)):02X}" for n in range(2, 8))
                     port_num = int(m.group(8))
                     mac_to_port[mac_hex] = f"Port {port_num}"
 
@@ -1173,26 +1051,21 @@ async def snmp_topology(params: SnmpTopologyInput) -> str:
 
         # Map ARP devices to switch ports
         switch_devices = defaultdict(list)
-        unmapped_ips = set(ip for ip, _, _ in arp_devices)
+        unmapped_ips = set(d["ip"] for d in arp_devices)
         unmapped_ips.discard(subnet.rsplit(".", 1)[0] + ".1")
 
-        for ip, mac, vendor in arp_devices:
+        for d in arp_devices:
             for sw_ip, sdata in snmp_data.items():
-                if mac and mac in sdata["mac_to_port"]:
-                    port = sdata["mac_to_port"][mac]
-                    if mac in sdata["port_names"]:
-                        port = f"{port} ({sdata['port_names'][mac]})"
-                    switch_devices[sw_ip].append((ip, mac, vendor, port))
-                    unmapped_ips.discard(ip)
+                if d["mac"] in sdata["mac_to_port"]:
+                    port = sdata["mac_to_port"][d["mac"]]
+                    if d["mac"] in sdata["port_names"]:
+                        port = f"{port} ({sdata['port_names'][d['mac']]})"
+                    switch_devices[sw_ip].append((d["ip"], d["mac"], d["vendor"], port))
+                    unmapped_ips.discard(d["ip"])
                     break
 
         # Draw gateway
         gw_ip = subnet.rsplit(".", 1)[0] + ".1"
-        gw_vendor = ""
-        for ip, mac, vendor in arp_devices:
-            if ip == gw_ip:
-                gw_vendor = vendor[:15] if vendor else ""
-                break
         lines.append(f'    internet --- gw["🏠 网关\\n{gw_ip}"]')
 
         # Draw each switch with its ports and devices
@@ -1202,10 +1075,9 @@ async def snmp_topology(params: SnmpTopologyInput) -> str:
             port_count = len(sdata["mac_to_port"])
             lines.append(f'    gw --- {sw_id}["🔀 {hn}\\n{sw_ip}\\n{port_count} devices"]')
 
-            devices = switch_devices.get(sw_ip, [])
-            for i, (ip, mac, vendor, port) in enumerate(devices):
+            for ip, mac, vendor, port in switch_devices.get(sw_ip, []):
                 dev_id = f'd_{ip.replace(".","_")}'
-                icon = _classify_device(vendor)[1]
+                icon = classify_device(vendor)[1]
                 label = f'{icon} {vendor[:12] if vendor[:3] != "(Un" else "设备"}\\n{ip}\\n{port}'
                 lines.append(f'    {sw_id} --- {dev_id}["{label}"]')
 
@@ -1220,8 +1092,8 @@ async def snmp_topology(params: SnmpTopologyInput) -> str:
         lines.append("### SNMP 交换机详情")
         for sw_ip, sdata in snmp_data.items():
             lines.append(f"\n**{sdata['hostname']}** ({sw_ip})")
-            lines.append(f"| MAC | IP | 端口 | 厂商 |")
-            lines.append(f"|------|------|------|------|")
+            lines.append("| MAC | IP | 端口 | 厂商 |")
+            lines.append("|------|------|------|------|")
             for ip, mac, vendor, port in switch_devices.get(sw_ip, []):
                 lines.append(f"| {mac} | {ip} | {port} | {vendor[:25]} |")
 
@@ -1229,52 +1101,23 @@ async def snmp_topology(params: SnmpTopologyInput) -> str:
             lines.append(f"\n⚠️ {len(unmapped_ips)} 台设备未匹配到任何 SNMP 交换机端口（可能是通过傻瓜交换机连接的）。")
 
     else:
-        # SNMP failed — fall back to ARP topology
+        # SNMP failed — fall back to ARP topology (shared rendering with
+        # network_topology via netinfo — no duplicated draw logic here)
         lines.append(f"## 🌐 网络拓扑 — {subnet}（SNMP 不可用，ARP 推测）")
         lines.append("")
         lines.append("> ⚠️ 未检测到 SNMP。显示 ARP 推测拓扑。精确映射需要交换机开启 SNMP v2c。")
         lines.append("")
-
         for sw_ip in switch_ips:
             lines.append(f"- `{sw_ip}`: SNMP 无响应")
         lines.append("")
-
-        # Reuse ARP topology code
-        devices = []
-        for ip, mac, vendor in arp_devices:
-            dclass, icon = _classify_device(vendor)
-            if ip.endswith(".1"):
-                dclass, icon = "gateway", "🏠"
-            devices.append({"ip": ip, "mac": mac, "vendor": vendor, "class": dclass, "icon": icon})
-
-        lines.append("```mermaid")
-        lines.append("graph TD")
-        lines.append('    internet(("🌍 Internet"))')
-        gw_id = "gw"
-        for d in devices:
-            if d["class"] == "gateway":
-                lines.append(f'    internet --- {gw_id}["🏠 网关\\n{d["ip"]}"]')
-                break
-
-        for d in devices:
-            if d["class"] not in ("gateway",):
-                did = f'd_{d["ip"].replace(".","_")}'
-                lines.append(f'    {gw_id} --- {did}["{d["icon"]} {d["vendor"][:12]}\\n{d["ip"]}"]')
-
-        lines.append("```")
-
-        # Stats
-        from collections import Counter
-        stats = Counter(d["class"] for d in devices)
+        lines.extend(arp_mermaid_lines(arp_devices))
         lines.append("")
         lines.append("### 设备分布")
-        lines.append("| 类别 | 数量 |")
-        lines.append("|------|------|")
-        for cls, cnt in stats.most_common():
-            icon = next((d["icon"] for d in devices if d["class"] == cls), "?")
-            lines.append(f"| {icon} {cls} | {cnt} |")
+        lines.extend(arp_class_stats_lines(arp_devices))
 
     return "\n".join(lines)
+
+
 
 
 # ===================================================================
