@@ -20,6 +20,8 @@ from kali_mcp.netinfo import (
     detect_default_iface,
     detect_gateway,
     detect_subnet,
+    merge_ndp_devices,
+    ndp_devices,
 )
 
 
@@ -242,3 +244,91 @@ class TestArpClassStatsLines:
     def test_empty(self):
         rows = arp_class_stats_lines([])
         assert rows == ["| 类别 | 数量 |", "|------|------|"]
+
+
+# ---------------------------------------------------------------------------
+# NDP (IPv6 neighbour table)
+# ---------------------------------------------------------------------------
+
+# Realistic `ip -6 neigh show` output (from a live Kali box)
+SAMPLE_NEIGH = "\n".join([
+    "fe80::d6e8:53ff:fe66:656f dev eth0 lladdr d4:e8:53:66:65:6f STALE",
+    "fe80::1a68:cbff:fe2b:3727 dev eth0 lladdr 18:68:cb:2b:37:27 REACHABLE",
+    "fe80::beef dev eth0 FAILED",
+    "some garbage line",
+])
+
+
+class TestNdpDevices:
+    def test_parses_entries(self):
+        ex = FakeExecutor({"neigh": SAMPLE_NEIGH})
+        devices = run(ndp_devices(ex))
+        assert len(devices) == 2  # FAILED entry (no lladdr) + garbage skipped
+        assert devices[0]["ip"] == "fe80::d6e8:53ff:fe66:656f"
+        assert devices[0]["mac"] == "D4:E8:53:66:65:6F"  # uppercased
+        assert devices[0]["vendor"] == "NDP"
+        assert devices[1]["mac"] == "18:68:CB:2B:37:27"
+
+    def test_skips_entry_without_lladdr(self):
+        ex = FakeExecutor({"neigh": SAMPLE_NEIGH})
+        devices = run(ndp_devices(ex))
+        assert all(d["ip"] != "fe80::beef" for d in devices)
+
+    def test_iface_filter_appended(self):
+        ex = FakeExecutor({"neigh": SAMPLE_NEIGH})
+        run(ndp_devices(ex, "eth1"))
+        assert ex.calls[0] == ["ip", "-6", "neigh", "show", "dev", "eth1"]
+
+    def test_failed_command_empty(self):
+        ex = FakeExecutor(success=False)
+        assert run(ndp_devices(ex)) == []
+
+
+class TestMergeNdpDevices:
+    def _arp(self):
+        return [
+            {"ip": "192.168.0.1", "mac": "AA:BB:CC:DD:EE:01", "vendor": "TP-Link",
+             "class": "gateway", "icon": "🏠"},
+            {"ip": "192.168.0.23", "mac": "AA:BB:CC:DD:EE:02", "vendor": "Apple",
+             "class": "computer", "icon": "💻"},
+        ]
+
+    def _ndp(self):
+        return [
+            # MAC shared with the ARP gateway → NOT v6-only
+            {"ip": "fe80::aa01", "mac": "AA:BB:CC:DD:EE:01", "vendor": "NDP",
+             "class": "unknown", "icon": "❓"},
+            # MAC absent from ARP → v6-only
+            {"ip": "fe80::d6e8:53ff:fe66:656f", "mac": "D4:E8:53:66:65:6F",
+             "vendor": "NDP", "class": "unknown", "icon": "❓"},
+        ]
+
+    def test_flags_v6_only_devices(self):
+        merged, v6_only = merge_ndp_devices(self._arp(), self._ndp())
+        assert len(merged) == 3
+        assert len(v6_only) == 1
+        assert v6_only[0]["ip"] == "fe80::d6e8:53ff:fe66:656f"
+        assert v6_only[0]["class"] == "ipv6-only"
+        assert v6_only[0]["icon"] == "🔮"
+
+    def test_shared_mac_not_duplicated(self):
+        merged, v6_only = merge_ndp_devices(self._arp(), self._ndp())
+        assert all(d["ip"] != "fe80::aa01" for d in merged)
+        assert all(d["ip"] != "fe80::aa01" for d in v6_only)
+
+    def test_inputs_not_mutated(self):
+        arp, ndp = self._arp(), self._ndp()
+        merge_ndp_devices(arp, ndp)
+        assert len(arp) == 2
+        assert ndp[1]["class"] == "unknown"
+
+    def test_empty_lists(self):
+        merged, v6_only = merge_ndp_devices([], [])
+        assert merged == [] and v6_only == []
+
+    def test_v6_only_device_renders_in_mermaid(self):
+        # Regression: v6 addresses contain ':' which would break mermaid
+        # node ids (dev_fe80::xxx). _safe_node_id must sanitize them.
+        merged, _ = merge_ndp_devices(self._arp(), self._ndp())
+        text = "\n".join(arp_mermaid_lines(merged))
+        assert "dev_fe80__d6e8_53ff_fe66_656f" in text

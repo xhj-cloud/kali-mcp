@@ -7,6 +7,8 @@ Single source of truth for "what is my local network":
 - detect_subnet        : 显式子网，或从默认路由网卡自动探测
 - detect_gateway       : 默认路由网关（ip route → via），含回退策略
 - arp_scan_devices     : arp-scan 扫描 + 解析 + 分类 → 设备 dict 列表
+- ndp_devices          : IPv6 邻居表（NDP）→ 与 arp 同构的设备 dict 列表
+- merge_ndp_devices    : 把 NDP-only 设备并入 ARP 列表，标出"仅 IPv6 可见"设备
 - arp_mermaid_lines    : 设备列表 → Mermaid 拓扑块（共享渲染）
 - arp_class_stats_lines: 设备类别分布表行
 - classify_device      : 厂商名 → (类别, 图标)
@@ -158,8 +160,72 @@ async def arp_scan_devices(
 
 
 # ---------------------------------------------------------------------------
+# NDP (IPv6 neighbour discovery) — IPv6 版的 ARP 表
+# ---------------------------------------------------------------------------
+
+
+async def ndp_devices(executor, iface: str | None = None) -> list[dict]:
+    """Read the IPv6 neighbour table (NDP) into device dicts.
+
+    Returns dicts with the same keys as :func:`arp_scan_devices`
+    (``ip, mac, vendor, class, icon``) so the two lists can be merged.
+    Entries without a ``lladdr`` (no MAC learned yet) are skipped.
+    """
+    cmd = ["ip", "-6", "neigh", "show"]
+    if iface:
+        cmd.extend(["dev", iface])
+    result = await executor.run(cmd, timeout=10)
+    devices: list[dict] = []
+    if result.success:
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) < 3 or parts[1] != "dev":
+                continue
+            mac = ""
+            for i, p in enumerate(parts):
+                if p == "lladdr" and i + 1 < len(parts):
+                    mac = parts[i + 1].upper()
+                    break
+            if not mac:
+                continue
+            dclass, icon = classify_device("Unknown")
+            devices.append(
+                {"ip": parts[0], "mac": mac, "vendor": "NDP", "class": dclass, "icon": icon}
+            )
+    return devices
+
+
+def merge_ndp_devices(
+    arp_devices: list[dict], ndp_devices: list[dict]
+) -> tuple[list[dict], list[dict]]:
+    """Merge NDP-only devices into the ARP device list.
+
+    A device is "IPv6-only" when its MAC appears in the NDP table but not
+    in the ARP table — i.e. it is invisible to IPv4 ARP scanning.
+    Returns ``(merged, v6_only)``; the input lists are not mutated.
+    """
+    v4_macs = {d["mac"] for d in arp_devices}
+    merged = list(arp_devices)
+    v6_only: list[dict] = []
+    for d in ndp_devices:
+        if d["mac"] in v4_macs:
+            continue
+        nd = dict(d)
+        nd["class"] = "ipv6-only"
+        nd["icon"] = "🔮"
+        merged.append(nd)
+        v6_only.append(nd)
+    return merged, v6_only
+
+
+# ---------------------------------------------------------------------------
 # Rendering (shared by network_topology and snmp_topology fallback)
 # ---------------------------------------------------------------------------
+
+
+def _safe_node_id(ip: str) -> str:
+    """Sanitize an address into a Mermaid-safe node id (v6 has colons)."""
+    return re.sub(r"[^0-9A-Za-z]", "_", ip)
 
 
 def arp_mermaid_lines(devices: list[dict]) -> list[str]:
@@ -168,7 +234,8 @@ def arp_mermaid_lines(devices: list[dict]) -> list[str]:
     Hierarchy: Internet → gateway → AP → devices (devices attach
     round-robin to APs, or directly to the gateway when there are none).
     Uses a placeholder ``gw`` node when no gateway was detected, so the
-    diagram always renders.
+    diagram always renders. IPv6-only devices (v6 addresses with colons)
+    are safe via :func:`_safe_node_id`.
     """
     lines = ["```mermaid", "graph TD"]
     lines.append('    internet(("🌍 Internet"))')
@@ -179,21 +246,21 @@ def arp_mermaid_lines(devices: list[dict]) -> list[str]:
         d for d in devices if d["class"] not in ("gateway", "ap", "router", "network")
     ]
 
-    gw_id = f'gw_{gateways[0]["ip"].replace(".", "_")}' if gateways else "gw"
+    gw_id = f'gw_{_safe_node_id(gateways[0]["ip"])}' if gateways else "gw"
 
     for g in gateways:
-        gid = f'gw_{g["ip"].replace(".", "_")}'
+        gid = f'gw_{_safe_node_id(g["ip"])}'
         lines.append(f'    internet --- {gid}["{g["icon"]} 网关\\n{g["ip"]}"]')
 
     for ap in aps:
         lines.append(
-            f'    {gw_id} --- ap_{ap["ip"].replace(".", "_")}'
+            f'    {gw_id} --- ap_{_safe_node_id(ap["ip"])}'
             f'["{ap["icon"]} {ap["vendor"][:12]}\\n{ap["ip"]}"]'
         )
 
-    ap_ids = [f'ap_{ap["ip"].replace(".", "_")}' for ap in aps]
+    ap_ids = [f'ap_{_safe_node_id(ap["ip"])}' for ap in aps]
     for i, dev in enumerate(others):
-        node_id = f'dev_{dev["ip"].replace(".", "_")}'
+        node_id = f'dev_{_safe_node_id(dev["ip"])}'
         parent = ap_ids[i % len(ap_ids)] if ap_ids else gw_id
         vendor_label = dev["vendor"][:15] if dev["vendor"] != "Unknown" else "未知设备"
         lines.append(

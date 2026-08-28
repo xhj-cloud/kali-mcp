@@ -88,3 +88,40 @@ class TestNmapInput:
     def test_rejects_bad_timing(self):
         with pytest.raises(ValidationError):
             NmapInput(target="192.168.1.1", timing="T9")
+
+
+class TestDdosInput:
+    def test_default_method_syn(self):
+        from kali_mcp.pentest import DdosInput
+
+        m = DdosInput(target="192.168.1.1")
+        assert m.method == "syn"
+
+    def test_icmpv6_accepts_ipv6_target(self):
+        from kali_mcp.pentest import DdosInput
+
+        m = DdosInput(target="2400:3200::1", method="icmpv6")
+        assert m.method == "icmpv6"
+
+    def test_icmpv6_accepts_zoned_ipv6(self):
+        from kali_mcp.pentest import DdosInput
+
+        m = DdosInput(target="fe80::1%eth0", method="icmpv6")
+        assert m.method == "icmpv6"
+
+    def test_icmpv6_rejects_ipv4_target(self):
+        from kali_mcp.pentest import DdosInput
+
+        with pytest.raises(ValidationError):
+            DdosInput(target="192.168.1.1", method="icmpv6")
+
+    def test_icmpv6_rejects_hostname(self):
+        from kali_mcp.pentest import DdosInput
+
+        with pytest.raises(ValidationError):
+            DdosInput(target="example.com", method="icmpv6")
+
+    def test_other_methods_still_allow_hostnames(self):
+        from kali_mcp.pentest import DdosInput
+
+        assert DdosInput(target="example.com", method="icmp").method == "icmp"

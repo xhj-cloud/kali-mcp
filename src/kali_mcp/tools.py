@@ -24,6 +24,8 @@ from kali_mcp.netinfo import (
     arp_scan_devices,
     classify_device,
     detect_subnet,
+    merge_ndp_devices,
+    ndp_devices,
 )
 
 # ---------------------------------------------------------------------------
@@ -858,12 +860,14 @@ async def network_topology(params: TopologyInput) -> str:
 
     Scans the subnet with arp-scan, classifies devices by vendor/type,
     and outputs a visual topology graph (Mermaid format) plus a summary
-    table. Renders directly in Cherry Studio and Markdown viewers.
+    table. Also merges the IPv6 NDP neighbour table so devices that are
+    only reachable over IPv6 (invisible to ARP) show up, flagged 🔮.
+    Renders directly in Cherry Studio and Markdown viewers.
 
     Use this to:
     - Visualize your LAN structure
     - Identify device roles (router, AP, camera, PC, phone, IoT)
-    - Spot rogue or unknown devices
+    - Spot rogue or unknown devices (including IPv6-only devices)
 
     Requires: arp-scan (sudo apt install arp-scan)
     """
@@ -879,6 +883,9 @@ async def network_topology(params: TopologyInput) -> str:
 
     if not result.success:
         return _fmt("Network Topology", subnet, f"arp-scan {subnet}", result)
+
+    # 2b. Merge IPv6 NDP neighbours; flag devices invisible to IPv4 ARP
+    devices, v6_only = merge_ndp_devices(devices, await ndp_devices(executor))
 
     # 3. Summary (stats + shared Mermaid rendering + device list)
     summary = [
@@ -898,6 +905,18 @@ async def network_topology(params: TopologyInput) -> str:
     ]
     for d in devices:
         summary.append(f"| {d['ip']} | {d['mac']} | {d['vendor']} | {d['icon']} {d['class']} |")
+
+    if v6_only:
+        summary.extend(
+            [
+                "",
+                f"### 🔮 仅 IPv6 可见设备（{len(v6_only)} 台，IPv4 ARP 扫不到）",
+                "| IPv6 地址 | MAC |",
+                "|------|------|",
+            ]
+        )
+        for d in v6_only:
+            summary.append(f"| `{d['ip']}` | {d['mac']} |")
 
     return "\n".join(summary)
 
@@ -953,8 +972,9 @@ async def snmp_topology(params: SnmpTopologyInput) -> str:
     # 1. Resolve subnet (explicit value wins, else auto-detect)
     subnet = await detect_subnet(executor, params.subnet)
 
-    # 2. ARP scan for all devices (shared parse+classify)
+    # 2. ARP scan for all devices (shared parse+classify) + NDP merge
     _, arp_devices = await arp_scan_devices(executor, subnet)
+    arp_devices, v6_only = merge_ndp_devices(arp_devices, await ndp_devices(executor))
 
     # 3. Find switches to query
     switch_ips = []
@@ -1114,6 +1134,17 @@ async def snmp_topology(params: SnmpTopologyInput) -> str:
         lines.append("")
         lines.append("### 设备分布")
         lines.extend(arp_class_stats_lines(arp_devices))
+        if v6_only:
+            lines.extend(
+                [
+                    "",
+                    f"### 🔮 仅 IPv6 可见设备（{len(v6_only)} 台，IPv4 ARP 扫不到）",
+                    "| IPv6 地址 | MAC |",
+                    "|------|------|",
+                ]
+            )
+            for d in v6_only:
+                lines.append(f"| `{d['ip']}` | {d['mac']} |")
 
     return "\n".join(lines)
 

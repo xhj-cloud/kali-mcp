@@ -304,14 +304,29 @@ _PKT_RE = re.compile(
     r"(\S+)"
 )
 
+# IPv6 lines: unix_ts IP6 [src[.port] > dst[.port]:] first_word [...], length N
+# (v6 addresses carry no dots, so a port is glued on with a dot: "2408::1.443")
+_PKT6_RE = re.compile(
+    r"[\d.]+\s+IP6\s+(\S+)\s*>\s*(\S+):\s*(\S+)"
+)
+
+
+def _split_v6_endpoint(endpoint: str) -> tuple[str, str]:
+    """Split a tcpdump v6 endpoint into (address, port-or-'')."""
+    if "." in endpoint:
+        addr, port = endpoint.rsplit(".", 1)
+        if port.isdigit():
+            return addr, port
+    return endpoint, ""
+
 
 def _normalize_proto(first_word: str) -> str:
     """Normalize the first word after ':' in tcpdump output to a protocol name."""
     w = first_word.lower().rstrip(",")
     if w == "flags":
         return "TCP"
-    elif w in ("udp", "icmp", "igmp", "esp", "ah", "gre"):
-        return w.upper()
+    elif w in ("udp", "icmp", "icmp6", "igmp", "esp", "ah", "gre"):
+        return w.upper() if w != "icmp6" else "ICMPv6"
     return "TCP"
 
 
@@ -335,8 +350,12 @@ async def traffic_stats(params: TrafficStatsInput) -> str:
     executor = get_executor(timeout=params.duration + 30)
     now = datetime.now(timezone.utc).astimezone().strftime("%H:%M:%S")
 
-    # 1. Capture packets
+    # 1. Capture packets. `timeout -s INT {duration}` bounds the capture at
+    # the requested duration: SIGINT makes tcpdump exit gracefully with its
+    # summary line (all packet lines already flushed via -l) instead of
+    # relying on the executor's backstop kill at duration+10.
     cmd = [
+        "timeout", "-s", "INT", str(params.duration),
         "tcpdump",
         "-i", params.interface,
         "-c", str(params.count),
@@ -355,11 +374,14 @@ async def traffic_stats(params: TrafficStatsInput) -> str:
     port_counter: Counter = Counter()
     size_counter: Counter = Counter()
     packet_count = 0
+    v4_count = 0
+    v6_count = 0
 
     for line in result.stdout.split("\n"):
         m = _PKT_RE.match(line)
         if m:
             packet_count += 1
+            v4_count += 1
             src_ip = m.group(1)
             dst_ip = m.group(3)
             dst_port = m.group(4)
@@ -370,6 +392,21 @@ async def traffic_stats(params: TrafficStatsInput) -> str:
             proto_counter[proto] += 1
             if dst_port:
                 port_counter[dst_port] += 1
+
+        else:
+            m6 = _PKT6_RE.match(line)
+            if m6:
+                packet_count += 1
+                v6_count += 1
+                src_ip, _ = _split_v6_endpoint(m6.group(1))
+                dst_ip, dst_port = _split_v6_endpoint(m6.group(2))
+                proto = _normalize_proto(m6.group(3))
+
+                ip_counter[src_ip] += 1
+                ip_counter[dst_ip] += 1
+                proto_counter[proto] += 1
+                if dst_port:
+                    port_counter[dst_port] += 1
 
         # Extract packet length ("length N")
         size_m = re.search(r"length\s+(\d+)", line)
@@ -384,6 +421,13 @@ async def traffic_stats(params: TrafficStatsInput) -> str:
         f"**接口:** `{params.interface}` | **时长:** {params.duration}s | **捕获:** {packet_count} 包",
         f"**时间:** {now}",
     ]
+    if packet_count:
+        v4_pct = v4_count / packet_count * 100
+        v6_pct = v6_count / packet_count * 100
+        lines.append(
+            f"**v4/v6 分布:** IPv4 {v4_count} 包 ({v4_pct:.1f}%) "
+            f"| IPv6 {v6_count} 包 ({v6_pct:.1f}%)"
+        )
     if params.filter_expr:
         lines.append(f"**过滤器:** `{params.filter_expr}`")
     lines.append("")

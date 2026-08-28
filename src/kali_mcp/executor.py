@@ -61,38 +61,68 @@ class CommandExecutor:
                 stdin=asyncio.subprocess.PIPE,
             )
 
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(
-                    input=input_data.encode("utf-8") if input_data else None
-                ),
-                timeout=timeout,
-            )
+            # Stream both pipes into chunk lists as data arrives. Unlike
+            # wait_for(proc.communicate()) — whose cancellation discards
+            # everything buffered in the pipes — this keeps partial output
+            # intact when the command is killed for exceeding the timeout.
+            stdout_chunks: list[bytes] = []
+            stderr_chunks: list[bytes] = []
 
-            stdout = stdout_bytes.decode("utf-8", errors="replace").strip()
-            stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
+            async def _pump(stream, sink: list[bytes]) -> None:
+                while True:
+                    chunk = await stream.read(65536)
+                    if not chunk:
+                        break
+                    sink.append(chunk)
 
-            result = CommandResult(
-                stdout=stdout,
-                stderr=stderr,
-                returncode=proc.returncode or 0,
-                success=proc.returncode == 0,
-            )
-            logger.info(
-                "Command completed: returncode=%d, stdout=%d chars",
-                result.returncode,
-                len(result.stdout),
-            )
-            return result
+            pump_tasks = []
+            if proc.stdout is not None:
+                pump_tasks.append(asyncio.ensure_future(_pump(proc.stdout, stdout_chunks)))
+            if proc.stderr is not None:
+                pump_tasks.append(asyncio.ensure_future(_pump(proc.stderr, stderr_chunks)))
 
-        except asyncio.TimeoutError:
+            async def _wait_completion() -> None:
+                if input_data is not None:
+                    proc.stdin.write(input_data.encode("utf-8"))
+                    await proc.stdin.drain()
+                proc.stdin.close()
+                await proc.stdin.wait_closed()
+                await proc.wait()
+                if pump_tasks:
+                    await asyncio.gather(*pump_tasks)
+
+            timed_out = False
             try:
-                proc.kill()
-                # Collect partial output that was already buffered
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    proc.communicate(), timeout=10
-                )
-                stdout = stdout_bytes.decode("utf-8", errors="replace").strip()
-                stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
+                await asyncio.wait_for(_wait_completion(), timeout=timeout)
+            except asyncio.TimeoutError:
+                timed_out = True
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass  # already exited (e.g. a grandchild holds the pipe)
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=10)
+                except asyncio.TimeoutError:
+                    logger.warning("Process did not exit after kill: %s", cmd_str)
+
+            # Drain whatever the pumps have buffered (after the kill the pipes
+            # reach EOF). Bounded, so a surviving grandchild holding a pipe
+            # open cannot hang us — we then use the partial output as-is.
+            if pump_tasks:
+                try:
+                    await asyncio.wait_for(asyncio.gather(*pump_tasks), timeout=5)
+                except asyncio.TimeoutError:
+                    for t in pump_tasks:
+                        t.cancel()
+                    logger.warning(
+                        "Pipes did not close after timeout; using partial output: %s",
+                        cmd_str,
+                    )
+
+            stdout = b"".join(stdout_chunks).decode("utf-8", errors="replace").strip()
+            stderr = b"".join(stderr_chunks).decode("utf-8", errors="replace").strip()
+
+            if timed_out:
                 stderr = (
                     stderr + f"\n[timed out after {timeout}s, showing partial output]"
                 ).strip()
@@ -106,14 +136,19 @@ class CommandExecutor:
                     returncode=-1,
                     success=False,
                 )
-            except Exception:
-                logger.warning("Command timed out after %ds: %s", timeout, cmd_str)
-                return CommandResult(
-                    stdout="",
-                    stderr=f"Command timed out after {timeout} seconds",
-                    returncode=-1,
-                    success=False,
-                )
+
+            result = CommandResult(
+                stdout=stdout,
+                stderr=stderr,
+                returncode=proc.returncode or 0,
+                success=proc.returncode == 0,
+            )
+            logger.info(
+                "Command completed: returncode=%d, stdout=%d chars",
+                result.returncode,
+                len(result.stdout),
+            )
+            return result
 
         except FileNotFoundError:
             logger.error("Command not found: %s", cmd[0])

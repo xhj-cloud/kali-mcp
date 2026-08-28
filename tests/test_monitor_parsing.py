@@ -2,7 +2,12 @@
 
 import pytest
 
-from kali_mcp.monitor import _PKT_RE, _normalize_proto
+from kali_mcp.monitor import (
+    _PKT6_RE,
+    _PKT_RE,
+    _normalize_proto,
+    _split_v6_endpoint,
+)
 
 
 class TestPacketRegex:
@@ -38,6 +43,50 @@ class TestPacketRegex:
     def test_does_not_match_garbage(self, bad):
         assert _PKT_RE.match(bad) is None
 
+    def test_does_not_match_v6_line(self):
+        # "IP6" must not be swallowed by the IPv4 regex ("IP " requires a space)
+        line = "1700000000.1 IP6 2408::1.443 > 2400:3200::1.53: UDP, length 48"
+        assert _PKT_RE.match(line) is None
+
+
+class TestPacket6Regex:
+    def test_parses_udp_with_ports(self):
+        line = "1700000000.123456 IP6 2408::1.443 > 2400:3200::1.53: UDP, length 48"
+        m = _PKT6_RE.match(line)
+        assert m is not None
+        assert _split_v6_endpoint(m.group(1)) == ("2408::1", "443")
+        assert _split_v6_endpoint(m.group(2)) == ("2400:3200::1", "53")
+        assert _normalize_proto(m.group(3)) == "UDP"
+
+    def test_parses_icmp6_without_ports(self):
+        line = (
+            "1700000000.222222 IP6 fe80::1 > ff02::1: ICMP6, neighbor "
+            "solicitation, who has fe80::2, length 32"
+        )
+        m = _PKT6_RE.match(line)
+        assert m is not None
+        assert _split_v6_endpoint(m.group(1)) == ("fe80::1", "")
+        assert _split_v6_endpoint(m.group(2)) == ("ff02::1", "")
+        assert _normalize_proto(m.group(3)) == "ICMPv6"
+
+    @pytest.mark.parametrize(
+        "bad", ["not a v6 line", "", "1700000000.1 IP 1.2.3.4.5 > 5.6.7.8.9: UDP, length 1"]
+    )
+    def test_does_not_match_non_v6(self, bad):
+        assert _PKT6_RE.match(bad) is None
+
+
+class TestSplitV6Endpoint:
+    def test_with_port(self):
+        assert _split_v6_endpoint("2408::1.443") == ("2408::1", "443")
+
+    def test_without_port(self):
+        assert _split_v6_endpoint("fe80::1") == ("fe80::1", "")
+
+    def test_multihop_address_kept(self):
+        # a bare v6 address has no dots → returned unchanged
+        assert _split_v6_endpoint("2400:3200::1") == ("2400:3200::1", "")
+
 
 class TestNormalizeProto:
     @pytest.mark.parametrize(
@@ -47,6 +96,8 @@ class TestNormalizeProto:
             ("flags", "TCP"),
             ("udp", "UDP"),
             ("icmp", "ICMP"),
+            ("icmp6", "ICMPv6"),
+            ("ICMP6,", "ICMPv6"),
             ("igmp", "IGMP"),
             ("esp", "ESP"),
             ("gre", "GRE"),
@@ -115,3 +166,39 @@ class TestNethogsParsing:
         assert set(procs) == {777, 888}
         assert procs[777]["recv"] == "34.5MiB/s"
         assert procs[888]["program"] == "firefox"
+
+
+# ---------------------------------------------------------------------------
+# traffic_stats capture command construction
+# ---------------------------------------------------------------------------
+
+class TestTrafficStatsCommand:
+    def test_capture_bounded_by_timeout_wrapper(self, monkeypatch):
+        """tcpdump must be bounded by `timeout -s INT {duration}` so the
+        capture ends at the requested duration with a clean SIGINT exit
+        (returncode 124) instead of relying on the executor backstop kill."""
+        import asyncio
+
+        import kali_mcp.monitor as mon
+        from kali_mcp.executor import CommandResult
+
+        recorded = []
+
+        class _FakeEx:
+            async def run(self, cmd, timeout=None, input_data=None):
+                recorded.append((list(cmd), timeout))
+                return CommandResult(
+                    stdout="", stderr="", returncode=124, success=False
+                )
+
+        monkeypatch.setattr(mon, "get_executor", lambda timeout=None: _FakeEx())
+        params = mon.TrafficStatsInput(interface="eth0", duration=12, count=200)
+        out = asyncio.run(mon.traffic_stats(params))
+
+        cmd, exec_timeout = recorded[0]
+        assert cmd[:4] == ["timeout", "-s", "INT", "12"]
+        assert cmd[4] == "tcpdump"
+        assert "-l" in cmd and "-tt" in cmd
+        assert exec_timeout == 22  # backstop = duration + 10
+        # graceful-stop path: rc 124 must not break the (empty) report
+        assert "**捕获:** 0 包" in out
