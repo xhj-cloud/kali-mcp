@@ -327,9 +327,7 @@ PUBLIC_IPV6_DNS: list[tuple[str, str]] = [
 ]
 
 _PING_LOSS_RE = re.compile(r"(\d+(?:\.\d+)?)% packet loss")
-_PING_RTT_RE = re.compile(r"time=[\d.]+ ms")
 _PING_AVG_RE = re.compile(r"min/avg/max/mdev = [\d.]+/([\d.]+)/[\d.]+/[\d.]+ ms")
-_PING_RCVD_RE = re.compile(r"(\d+) packets received")
 
 # ===================================================================
 # Pydantic input models
