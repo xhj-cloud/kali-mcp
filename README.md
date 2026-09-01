@@ -127,6 +127,11 @@ chmod +x setup.sh
 sudo ./setup.sh
 ```
 
+> 🔴 **要用 `system_patch_audit`（补丁比对找漏洞）？** 改用 `sudo ./setup.sh --tool-level full`：
+> 额外安装 sqlmap/msfvenom 等攻击工具，并自动装好 vuls 二进制 + sshpass shim + vuls2 DB 目录
+> （~12GB 漏洞库在首次调用时自动下载到 `/var/lib/kali-mcp-vuls/vuls.db`）。
+> 该级别同时把 `.env` 的 `PENTEST_ENABLED` / `ATTACK_ENABLED` 置为 `true`。
+
 ### 2. 配置
 
 ```bash
