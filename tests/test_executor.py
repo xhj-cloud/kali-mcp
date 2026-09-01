@@ -68,3 +68,34 @@ class TestTimeout:
         r = _run(ex.run(["sh", "-c", "sleep 5"], timeout=1))
         assert r.success is False
         assert "[timed out after 1s" in r.stderr
+
+
+class TestHoldStdin:
+    """Regression: the executor closed stdin immediately (EOF), which made
+    interactive flooders like yersinia ('Press any key to stop') exit after
+    ~1s — reporting success while sending almost no packets. hold_stdin
+    must keep the pipe open until timeout kills the process."""
+
+    def test_default_closes_stdin(self):
+        """cat exits on the EOF delivered by the default stdin close."""
+        ex = CommandExecutor(default_timeout=5)
+        r = _run(ex.run(["cat"], timeout=5))
+        assert r.success is True
+        assert r.returncode == 0
+
+    def test_hold_stdin_blocks_until_timeout(self):
+        """With hold_stdin, cat keeps waiting for input and only dies when
+        the executor kills it at the timeout."""
+        ex = CommandExecutor(default_timeout=5)
+        r = _run(ex.run(["cat"], timeout=1, hold_stdin=True))
+        assert r.success is False
+        assert r.returncode == -1
+        assert "[timed out after 1s" in r.stderr
+
+    def test_hold_stdin_with_input_data(self):
+        """input_data is still written first; the held pipe then keeps the
+        process alive (cat echoes the data, then blocks until the kill)."""
+        ex = CommandExecutor(default_timeout=5)
+        r = _run(ex.run(["cat"], input_data="hi", timeout=1, hold_stdin=True))
+        assert r.returncode == -1
+        assert "hi" in r.stdout

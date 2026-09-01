@@ -38,6 +38,7 @@ class CommandExecutor:
         cmd: list[str],
         timeout: int | None = None,
         input_data: str | None = None,
+        hold_stdin: bool = False,
     ) -> CommandResult:
         """Execute a command and return its output.
 
@@ -45,6 +46,12 @@ class CommandExecutor:
             cmd: Command as list, e.g. ['nmap', '-sP', '192.168.1.0/24']
             timeout: Override default timeout in seconds
             input_data: Optional data to pipe to process stdin
+            hold_stdin: Keep the stdin pipe open (and unread) for the whole
+                run. For interactive tools that block on a "press any key to
+                stop" read (e.g. yersinia dhcp flood) — closing stdin would
+                deliver EOF and make them exit immediately without doing
+                anything. The command then runs until it exits on its own or
+                the timeout kills it.
 
         Returns:
             CommandResult with captured stdout, stderr, and exit code
@@ -85,8 +92,9 @@ class CommandExecutor:
                 if input_data is not None:
                     proc.stdin.write(input_data.encode("utf-8"))
                     await proc.stdin.drain()
-                proc.stdin.close()
-                await proc.stdin.wait_closed()
+                if not hold_stdin:
+                    proc.stdin.close()
+                    await proc.stdin.wait_closed()
                 await proc.wait()
                 if pump_tasks:
                     await asyncio.gather(*pump_tasks)
