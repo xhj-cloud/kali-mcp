@@ -140,6 +140,76 @@ _nuclei_setup() {
     fi
 }
 
+# --- vuls (system_patch_audit, 🔴 ATTACK tool) ---
+# Compares a target's installed patches (Windows KB/hotfix + OS build, or
+# Linux package versions) against the vuls2 CVE database over SSH.
+# Installs the vuls binary, an sshpass PATH shim (password travels in an
+# env var, never argv), and the vuls2 DB dir. The ~12GB vuls2 DB is pulled
+# automatically on the FIRST system_patch_audit run (on-demand), then reused.
+_vuls_setup() {
+    local VULS_VERSION="0.39.3"   # validated end-to-end; bump as needed
+    local VULS_BIN_PATH="/usr/local/bin/vuls"
+    local SHIM_DIR="/usr/local/lib/kali-mcp-vuls/bin"
+    local VULS2_DIR="/var/lib/kali-mcp-vuls"
+
+    local MACHINE VULS_ARCH
+    MACHINE=$(uname -m)
+    case "$MACHINE" in
+        x86_64|amd64)  VULS_ARCH="amd64" ;;
+        aarch64|arm64) VULS_ARCH="arm64" ;;
+        *)             VULS_ARCH="$MACHINE" ;;
+    esac
+
+    echo -e "\n  ${BOLD}[system_patch_audit] vuls ${VULS_VERSION} (linux/${VULS_ARCH})${NC}"
+    local tmp
+    tmp=$(mktemp -d)
+
+    # 1) vuls binary — prebuilt GitHub release (binary inside is named 'future-vuls')
+    if command -v vuls &>/dev/null; then
+        ok "vuls already on PATH: $(command -v vuls)"
+    else
+        local url src
+        url="https://github.com/future-architect/vuls/releases/download/v${VULS_VERSION}/future-vuls_${VULS_VERSION}_linux_${VULS_ARCH}.tar.gz"
+        src=""
+        if curl -fSL "$url" -o "$tmp/vuls.tar.gz" 2>/dev/null \
+           && tar xzf "$tmp/vuls.tar.gz" -C "$tmp" 2>/dev/null; then
+            src=$(ls "$tmp"/future-vuls "$tmp"/vuls 2>/dev/null | head -1 || true)
+        fi
+        if [ -n "$src" ] && [ -f "$src" ]; then
+            if $SUDO install -m 0755 "$src" "$VULS_BIN_PATH" 2>/dev/null; then
+                ok "vuls → ${VULS_BIN_PATH}"
+            else
+                err "vuls extracted but install to ${VULS_BIN_PATH} failed"
+            fi
+        else
+            err "vuls ${VULS_VERSION} (linux/${VULS_ARCH}) download failed — system_patch_audit unavailable"
+        fi
+    fi
+
+    # 2) sshpass PATH shim — per-run known_hosts + optional password auth (env, not argv)
+    cat > "$tmp/ssh.shim" <<'SHIM'
+#!/bin/sh
+# PATH shim for vuls (kali-mcp): per-run known_hosts + optional sshpass password auth
+KNOWN="${VULS_SSH_KNOWN_HOSTS:-/var/lib/kali-mcp-vuls/ssh_known_hosts}"
+if [ -n "$VULS_SSH_PASSWORD" ]; then
+  export SSHPASS="$VULS_SSH_PASSWORD"
+  exec /usr/bin/sshpass -e /usr/bin/ssh -o UserKnownHostsFile="$KNOWN" "$@"
+fi
+exec /usr/bin/ssh -o UserKnownHostsFile="$KNOWN" "$@"
+SHIM
+    if $SUDO mkdir -p "$SHIM_DIR" "$VULS2_DIR" 2>/dev/null \
+       && $SUDO install -m 0755 "$tmp/ssh.shim" "$SHIM_DIR/ssh" 2>/dev/null; then
+        ok "ssh shim → ${SHIM_DIR}/ssh"
+        ok "vuls2 DB dir → ${VULS2_DIR}/"
+    else
+        warn "could not install ssh shim — key auth still works; password auth needs ${SHIM_DIR}/ssh"
+    fi
+
+    echo -e "  ${CYAN}Note: the ~12GB vuls2 CVE DB auto-downloads on the first system_patch_audit${NC}"
+    echo -e "  ${CYAN}run (pass a larger --timeout that once); it is reused on later runs.${NC}"
+    rm -rf "$tmp" 2>/dev/null || true
+}
+
 # --- Attack packages (--tool-level full) ---
 ATTACK_PKGS=(
     sqlmap
@@ -155,7 +225,7 @@ ATTACK_PKGS=(
     reaver
     ettercap-text-only
     bettercap
-    sslstrip
+    sshpass         # system_patch_audit — password auth via PATH shim (never argv)
 )
 
 step "1/6" "Installing system packages (level: ${TOOL_LEVEL})..."
@@ -177,6 +247,7 @@ if [ "$TOOL_LEVEL" = "full" ]; then
     echo -e "  Installing attack packages..."
     $SUDO apt install -y -qq "${ATTACK_PKGS[@]}" 2>&1 | tail -1
     ok "Attack packages ($(echo "${ATTACK_PKGS[@]}" | wc -w) pkgs)"
+    _vuls_setup
 fi
 
 else
@@ -376,6 +447,11 @@ echo ""
 echo -e "  ${BOLD}Kali IP:${NC}       ${CYAN}${HOST_IP}${NC}"
 echo -e "  ${BOLD}MCP URL:${NC}      ${CYAN}http://${HOST_IP}:8000/mcp${NC}"
 echo -e "  ${BOLD}Tool level:${NC}   ${TOOL_LEVEL}"
+if [ "$TOOL_LEVEL" = "full" ]; then
+    echo ""
+    echo -e "  ${BOLD}system_patch_audit:${NC} vuls installed. First run auto-downloads the"
+    echo -e "    ~12GB vuls2 CVE DB (pass a larger --timeout that once); reused after."
+fi
 echo ""
 echo -e "  Connect Cherry Studio → MCP → Streamable HTTP:"
 echo -e "    ${BOLD}http://${HOST_IP}:8000/mcp${NC}"
