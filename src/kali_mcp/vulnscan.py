@@ -983,6 +983,726 @@ async def ssl_cert_check(params: SslCertInput) -> str:
 
 
 # ===================================================================
+# System Patch Audit — compare installed patches against the vuls2
+# CVE database (Vuls). Windows hotfixes/KB + OS build and Linux
+# package versions are compared to find unpatched CVEs.
+#
+# Engine: vuls (github.com/future-architect/vuls) running over SSH.
+#   - scan  : collect installed patches via SSH (PowerShell on Windows)
+#   - report: correlate against the vuls2 DB (pulled from ghcr.io)
+#
+# SSH auth: key-based (keyPath) or password via an sshpass PATH shim
+# (the password travels in an environment variable, never argv).
+# The shim dir is configurable via $VULS_SSH_SHIM_DIR.
+# ===================================================================
+
+#: Env var overriding the vuls binary (default: resolved from PATH).
+VULS_BIN_ENV = "VULS_BIN"
+
+#: Env var overriding the ssh shim directory (default below).
+VULS_SSH_SHIM_DIR_ENV = "VULS_SSH_SHIM_DIR"
+
+#: Default location of the ssh shim directory (deployed by setup.sh).
+_DEFAULT_SHIM_DIR = "/usr/local/lib/kali-mcp-vuls/bin"
+
+#: Env var overriding the persistent vuls2 CVE database path.
+VULS2_DB_PATH_ENV = "VULS2_DB_PATH"
+
+#: Persistent location of the ~12GB vuls2 boltdb (survives per-run
+#: temp workdirs; re-downloaded automatically when missing or stale).
+_DEFAULT_VULS2_DB_PATH = "/var/lib/kali-mcp-vuls/vuls.db"
+
+#: Pinned vuls2 nightly DB image + schema tag (schema 0, as of vuls
+#: v0.39.3). Pinning the tag keeps the digest check against the exact
+#: image the deployed DB was pulled from.
+_DEFAULT_VULS2_REPO = "ghcr.io/vulsio/vuls-nightly-db:0"
+
+#: Families whose CVE detection vuls supports (detector dispatch list).
+_SUPPORTED_FAMILIES = {
+    "windows", "debian", "ubuntu", "raspbian", "alpine",
+    "redhat", "centos", "fedora", "alma", "rocky", "oracle",
+    "amazon", "opensuse", "opensuseleap", "suseenterprise",
+    "suseenterprisedesktop",
+}
+
+_SEVERITY_ORDER = ["critical", "high", "medium", "low", "unknown"]
+_SEVERITY_LABEL = {
+    "critical": "🔴 Critical",
+    "high": "🟠 High",
+    "medium": "🟡 Medium",
+    "low": "🟢 Low",
+    "unknown": "⚪ Unknown",
+}
+
+
+def _resolve_vuls_bin() -> str:
+    """Locate the vuls binary: $VULS_BIN if set, else PATH lookup."""
+    import os
+    import shutil
+
+    override = os.environ.get(VULS_BIN_ENV, "").strip()
+    if override:
+        return override
+    found = shutil.which("vuls")
+    return found or "vuls"
+
+
+def _resolve_ssh_shim_dir() -> str | None:
+    """Locate the ssh shim dir (containing the 'ssh' wrapper script).
+
+    Priority: $VULS_SSH_SHIM_DIR (authoritative) then the default
+    install location. Returns None when no shim is present — in that
+    case only key-based auth is possible.
+    """
+    import os
+
+    override = os.environ.get(VULS_SSH_SHIM_DIR_ENV, "").strip()
+    cand = override if override else _DEFAULT_SHIM_DIR
+    if os.path.isfile(os.path.join(cand, "ssh")):
+        return cand
+    return None
+
+
+def _resolve_vuls2_db_path() -> str:
+    """Persistent vuls2 DB path: $VULS2_DB_PATH if set, else default.
+
+    The DB is ~12GB; pinning a fixed path means it is downloaded once
+    and reused across runs (vuls re-checks the digest and refreshes
+    only when the pinned nightly image actually changed).
+    """
+    import os
+
+    override = os.environ.get(VULS2_DB_PATH_ENV, "").strip()
+    return override or _DEFAULT_VULS2_DB_PATH
+
+
+def _toml_escape(value: str) -> str:
+    """Escape a string for inclusion in a TOML basic string."""
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _pick(d: dict, *keys, default=None):
+    """First present key wins (handles the PascalCase→lowercase JSON
+    rename between vuls versions)."""
+    for k in keys:
+        if isinstance(d, dict) and k in d and d[k] not in (None, ""):
+            return d[k]
+    return default
+
+
+def _severity_from_score(score: float | None) -> str:
+    """Map a CVSS score to a severity bucket."""
+    if not score:
+        return "unknown"
+    if score >= 9.0:
+        return "critical"
+    if score >= 7.0:
+        return "high"
+    if score >= 4.0:
+        return "medium"
+    return "low"
+
+
+def _find_latest_result_json(results_dir: str) -> str | None:
+    """Newest <results>/<timestamp>/<server>.json under results_dir."""
+    import glob
+    import os
+
+    pattern = os.path.join(results_dir, "*", "*.json")
+    files = [
+        p for p in glob.glob(pattern)
+        if os.path.basename(os.path.dirname(p)) != "vuls"
+    ]
+    if not files:
+        # Flat layout fallback (single result file directly in dir)
+        files = glob.glob(os.path.join(results_dir, "*.json"))
+    if not files:
+        return None
+    return max(files, key=os.path.getmtime)
+
+
+def _scan_error_from_result(data: dict) -> str | None:
+    """Fatal per-server errors recorded in a scan result, if any."""
+    for err in data.get("errors") or []:
+        text = err if isinstance(err, str) else str(err)
+        low = text.lower()
+        if any(
+            marker in low
+            for marker in ("failed", "error", "timeout", "refused", "denied")
+        ):
+            return text.strip()
+    return None
+
+
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _strip_html(text: str) -> str:
+    """Reduce an HTML fragment (e.g. Microsoft advisory descriptions)
+    to plain text."""
+    text = _HTML_TAG_RE.sub(" ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def _extract_cve_fields(c: dict) -> tuple[float | None, str, str, list[str]]:
+    """Extract (score, title, description, links) from a vuls2 VulnInfo.
+
+    vuls2 shape (v0.39.x): ``cveContents`` is a dict of
+    ``{source: [content, ...]}`` where each content carries
+    ``cvss3Score``/``cvss40Score``/``cvss2Score``, ``title``, ``summary``,
+    ``sourceLink`` and ``references: [{link, source}, ...]``. The
+    description is often empty in ``summary``; Microsoft advisory text
+    lives (as HTML) in ``distroAdvisories[0].description``.
+    """
+    score = 0.0
+    title = ""
+    desc = ""
+    links: list[str] = []
+
+    contents = c.get("cveContents")
+    if isinstance(contents, dict):
+        for lst in contents.values():
+            if not isinstance(lst, list):
+                continue
+            for item in lst:
+                if not isinstance(item, dict):
+                    continue
+                for key in ("cvss3Score", "cvss40Score", "cvss2Score"):
+                    raw = item.get(key)
+                    try:
+                        fv = float(raw) if raw is not None else 0.0
+                    except (TypeError, ValueError):
+                        fv = 0.0
+                    if fv > score:
+                        score = fv
+                if not title and item.get("title"):
+                    title = str(item["title"])
+                if not desc and item.get("summary"):
+                    desc = str(item["summary"]).strip()
+                if item.get("sourceLink"):
+                    links.append(str(item["sourceLink"]))
+                for ref in item.get("references") or []:
+                    if isinstance(ref, dict) and ref.get("link"):
+                        links.append(str(ref["link"]))
+
+    if not desc:
+        for adv in c.get("distroAdvisories") or []:
+            if isinstance(adv, dict) and adv.get("description"):
+                desc = _strip_html(str(adv["description"]))
+                break
+
+    # Dedup links, keep order.
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for link in links:
+        if link and link not in seen:
+            seen.add(link)
+            uniq.append(link)
+
+    return (score if score > 0 else None), title, desc, uniq
+
+
+class SystemPatchAuditInput(BaseModel):
+    """Input for system patch audit (Vuls over SSH)."""
+
+    host: str = Field(
+        ...,
+        description="Target host IP or hostname (Windows or Linux, e.g. '192.168.0.100')",
+        min_length=1,
+        max_length=256,
+    )
+    port: int = Field(default=22, ge=1, le=65535, description="SSH port")
+    user: str = Field(
+        ...,
+        min_length=1,
+        max_length=128,
+        description="SSH username",
+    )
+    password: str = Field(
+        default="",
+        max_length=256,
+        description=(
+            "SSH password (passed to sshpass via environment, never on the "
+            "command line). Leave empty for key-based auth."
+        ),
+    )
+    key_path: str = Field(
+        default="",
+        max_length=512,
+        description="Optional local path to an SSH private key",
+    )
+    severity: str = Field(
+        default="all",
+        pattern=r"^(all|critical|high|medium|low|unknown)$",
+        description="Minimum severity to list: critical, high, medium, low, unknown, or all",
+    )
+    max_results: int = Field(
+        default=100, ge=1, le=500, description="Max CVE entries to list in the report"
+    )
+    timeout: int = Field(
+        default=600,
+        ge=120,
+        le=3600,
+        description="Max seconds for the scan (first run also pulls the vuln DB)",
+    )
+
+    @field_validator("host")
+    @classmethod
+    def validate_host(cls, v: str) -> str:
+        _no_shell_meta(v)
+        return v
+
+    @field_validator("user")
+    @classmethod
+    def validate_user(cls, v: str) -> str:
+        _no_shell_meta(v)
+        return v
+
+    @field_validator("key_path")
+    @classmethod
+    def validate_key_path(cls, v: str) -> str:
+        if v:
+            _no_shell_meta(v)
+        return v
+
+
+async def system_patch_audit(params: SystemPatchAuditInput) -> str:
+    """系统补丁审计 — 比对补丁寻找系统漏洞（Vuls over SSH）。
+
+    Scans a target's installed patch level — Windows hotfixes (KB) + OS
+    build, or Linux package versions — and compares it against the vuls2
+    vulnerability database to find unpatched CVEs (with severity, CVSS and
+    fixed versions).
+
+    Works over SSH: Windows targets need OpenSSH (built into Win10/11);
+    Linux targets need openssh. Auth via password (sshpass shim) or key.
+
+    Requires: vuls binary ($VULS_BIN or PATH) and the ssh shim dir
+    ($VULS_SSH_SHIM_DIR) for password auth.
+    """
+    import json
+    import os
+    import shutil
+    import tempfile
+    import time
+
+    executor = get_executor(timeout=30)
+    vuls_bin = _resolve_vuls_bin()
+    shim_dir = _resolve_ssh_shim_dir()
+
+    if params.password and shim_dir is None:
+        return (
+            "❌ 无法完成补丁审计：密码认证需要 sshpass 包装器（PATH shim），"
+            f"但未找到 shim 目录（查找顺序：${VULS_SSH_SHIM_DIR_ENV} → "
+            f"{_DEFAULT_SHIM_DIR}）。\n"
+            "请改用 key_path 参数（密钥认证），或先完成 shim 部署。"
+        )
+
+    workdir = tempfile.mkdtemp(prefix="vuls-audit-")
+    success = False
+    try:
+        # ------------------------------------------------------------------
+        # 1. Per-run working files: config.toml + known_hosts
+        # ------------------------------------------------------------------
+        config_path = os.path.join(workdir, "config.toml")
+        known_hosts = os.path.join(workdir, "known_hosts")
+        results_dir = os.path.join(workdir, "results")
+        os.makedirs(results_dir, exist_ok=True)
+
+        toml_lines = [
+            "[servers]",
+            "  [servers.audit-target]",
+            f'  host = "{_toml_escape(params.host)}"',
+            f'  port = "{params.port}"',
+            f'  user = "{_toml_escape(params.user)}"',
+        ]
+        if params.key_path:
+            toml_lines.append(f'  keyPath = "{_toml_escape(params.key_path)}"')
+        # Persistent vuls2 CVE database. Without a pinned path vuls
+        # drops the ~12GB DB into the (temp) cwd and re-pulls it on
+        # every run.
+        toml_lines += [
+            "",
+            "[vuls2]",
+            f'repository = "{_DEFAULT_VULS2_REPO}"',
+            f'path = "{_toml_escape(_resolve_vuls2_db_path())}"',
+        ]
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(toml_lines) + "\n")
+
+        # Pre-populate the per-run known_hosts (vuls pre-checks it before
+        # scanning and fails otherwise).
+        rks = await executor.run(
+            ["ssh-keyscan", "-H", "-T", "10", "-p", str(params.port), params.host],
+            timeout=25,
+        )
+        if not rks.stdout.strip():
+            raise _AuditError(
+                f"无法获取 {params.host}:{params.port} 的 host key"
+                "（SSH 不可达或端口未开放）。请确认目标可达且 SSH 服务已开启。"
+            )
+        with open(known_hosts, "w", encoding="utf-8") as f:
+            f.write(rks.stdout.strip() + "\n")
+
+        # ------------------------------------------------------------------
+        # 2. Scan (collect installed patches via SSH)
+        # ------------------------------------------------------------------
+        env: dict[str, str] = {}
+        if shim_dir:
+            env["PATH"] = shim_dir + os.pathsep + os.environ.get("PATH", "")
+        env["VULS_SSH_KNOWN_HOSTS"] = known_hosts
+        if params.password:
+            env["VULS_SSH_PASSWORD"] = params.password
+
+        scan_cmd = [
+            vuls_bin, "scan",
+            "-config", config_path,
+            "-results-dir", results_dir,
+            "-timeout", "300",
+            "-timeout-scan", str(params.timeout),
+        ]
+        rscan = await executor.run(
+            scan_cmd, timeout=params.timeout + 600, env=env or None
+        )
+        scan_tail = (rscan.stderr or rscan.stdout or "").strip()
+
+        result_path = _find_latest_result_json(results_dir)
+        data: dict | None = None
+        if result_path:
+            try:
+                with open(result_path, encoding="utf-8") as f:
+                    data = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                data = None
+
+        fatal = _scan_error_from_result(data) if data else None
+        if rscan.returncode != 0 or data is None or fatal:
+            raise _AuditError(
+                "扫描失败（vuls scan 未产出可用结果）。\n"
+                f"vuls 输出（尾部）：\n```\n{scan_tail[-2000:]}\n```"
+                + (f"\n结果中记录的错误：{fatal[:500]}" if fatal else "")
+            )
+
+        # ------------------------------------------------------------------
+        # 3. Report (correlate against the vuls2 CVE database)
+        # ------------------------------------------------------------------
+        report_cmd = [
+            vuls_bin, "report",
+            "-config", config_path,
+            "-results-dir", results_dir,
+            "-format-json",
+        ]
+        rrep = await executor.run(report_cmd, timeout=900, env=env or None)
+        rep_text = (rrep.stdout or "").strip()
+        rep_err = (rrep.stderr or "").strip()
+        unsupported = "unsupported detection methods" in rep_err.lower()
+
+        # vuls report (v0.39.x) writes the correlation results BACK INTO
+        # the scan result JSON in place — stdout carries nothing. Older
+        # builds print the report JSON to stdout; accept both.
+        reported: dict | None = None
+        if result_path:
+            try:
+                with open(result_path, encoding="utf-8") as f:
+                    reported = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                reported = None
+        if reported is None and rep_text[:1] in {"{", "["}:
+            try:
+                parsed = json.loads(rep_text)
+                if isinstance(parsed, list):
+                    parsed = parsed[0] if parsed else None
+                if isinstance(parsed, dict):
+                    reported = parsed
+            except json.JSONDecodeError:
+                reported = None
+
+        if unsupported and data is not None:
+            success = True
+            return (
+                _render_patch_inventory(data, params)
+                + "\n\n⚠️ 漏洞比对：vuls 不支持 "
+                f"`{str(_pick(data, 'family', 'Family', default='unknown')).lower()}` "
+                "发行版的 CVE 检测（支持：Windows / Debian / "
+                "Ubuntu / RHEL 系 / Alpine 等）。以上为已安装补丁清单与"
+                "可更新项，可手动对照发行版安全公告。"
+            )
+
+        if rrep.returncode != 0 or reported is None:
+            raise _AuditError(
+                "报告生成失败（vuls report 未产出结果）。\n"
+                f"vuls 输出（尾部）：\n```\n{rep_err[-2000:] or rep_text[-2000:]}\n```"
+            )
+
+        # ------------------------------------------------------------------
+        # 4. Render the Markdown report
+        # ------------------------------------------------------------------
+        success = True
+        return _render_vuln_report(reported, params, workdir=workdir)
+
+    except _AuditError as e:
+        return (
+            f"❌ {e}\n\n（调试信息：工作目录已保留 → `{workdir}`，"
+            "排查后可手动删除）"
+        )
+    finally:
+        if success:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+
+class _AuditError(Exception):
+    """Fatal audit error carrying a user-facing message."""
+
+
+def _render_patch_inventory(data: dict, params: SystemPatchAuditInput) -> str:
+    """Fallback report: installed patch inventory without CVE detection."""
+    family = _pick(data, "family", "Family", default="unknown")
+    release = _pick(data, "release", "Release", default="")
+    kernel = _pick(
+        _pick(data, "runningKernel", "RunningKernel", default={}) or {},
+        "release", "Release",
+        default=_pick(data, "kernel", "Kernel", default=""),
+    )
+    packages = _pick(data, "packages", "Packages", default={}) or {}
+    if isinstance(packages, list):
+        packages = {p.get("name", "?"): p for p in packages if isinstance(p, dict)}
+
+    updatable = {
+        name: info
+        for name, info in packages.items()
+        if isinstance(info, dict)
+        and (info.get("newVersion") or info.get("newRelease"))
+    }
+
+    wkb = _pick(data, "windowsKB", "WindowsKB", default=None)
+    if not isinstance(wkb, dict):
+        wkb = {}
+    kb_applied = [k for k in wkb.get("applied") or [] if isinstance(k, str)]
+    kb_unapplied = [
+        k for k in wkb.get("unapplied") or [] if isinstance(k, str)
+    ]
+    is_windows = str(family).lower() == "windows"
+
+    lines = [
+        f"# 🩺 系统补丁清单 — {params.host}",
+        "",
+        "| 项目 | 值 |",
+        "|---|---|",
+        f"| 系统 | {family} {release} |",
+        f"| 内核/Build | {kernel or 'n/a'} |",
+    ]
+    if is_windows:
+        lines.append(
+            f"| 热修复 (Hotfix/KB) | {len(kb_applied)} 个已应用"
+            + (f"，{len(kb_unapplied)} 个缺失" if kb_unapplied else "") + " |"
+        )
+    else:
+        lines.append(
+            f"| 已装包/补丁 | {len(packages)} 个（其中 {len(updatable)} 个有可用更新） |"
+        )
+    lines.append(f"| 扫描时间 | {_pick(data, 'scannedAt', 'ScannedAt', default='n/a')} |")
+
+    if is_windows and kb_unapplied:
+        lines += [
+            "",
+            "## 🚨 未安装的关键补丁（unapplied KB）",
+            "",
+            f"共 {len(kb_unapplied)} 个（列出前 20）：",
+            "",
+        ]
+        lines += [f"- `KB{k}`" for k in kb_unapplied[:20]]
+    if updatable:
+        lines += ["", "## 🔄 有可用更新的包（前 50）", "",
+                  "| 包 | 已装 | 可更新到 |", "|---|---|---|"]
+        for name, info in list(updatable.items())[:50]:
+            lines.append(
+                f"| {name} | {info.get('version', '?')} "
+                f"→ {info.get('newVersion') or info.get('newRelease') or '?'} |"
+            )
+    return "\n".join(lines)
+
+
+def _render_vuln_report(
+    data: dict, params: SystemPatchAuditInput, workdir: str
+) -> str:
+    """Render the final patch-audit report from a vuls report JSON."""
+    family = str(_pick(data, "family", "Family", default="unknown")).lower()
+    release = _pick(data, "release", "Release", default="")
+    kernel = _pick(
+        _pick(data, "runningKernel", "RunningKernel", default={}) or {},
+        "release", "Release",
+        default=_pick(data, "kernel", "Kernel", default=""),
+    )
+    packages = _pick(data, "packages", "Packages", default={}) or {}
+    if isinstance(packages, list):
+        packages = {p.get("name", "?"): p for p in packages if isinstance(p, dict)}
+
+    is_windows = family == "windows"
+    pkg_label = "热修复 (Hotfix/KB)" if is_windows else "已安装包"
+    updatable = {
+        name: info
+        for name, info in packages.items()
+        if isinstance(info, dict)
+        and (info.get("newVersion") or info.get("newRelease"))
+    }
+
+    # Windows: installed hotfixes live in windowsKB, not packages.
+    # ``unapplied`` = KBs vuls' rollup rules expect but that are missing.
+    wkb = _pick(data, "windowsKB", "WindowsKB", default=None)
+    if not isinstance(wkb, dict):
+        wkb = {}
+    kb_applied = [k for k in wkb.get("applied") or [] if isinstance(k, str)]
+    kb_unapplied = [
+        k for k in wkb.get("unapplied") or [] if isinstance(k, str)
+    ]
+
+    # --- collect CVE entries (vuls2: dict; older: list) ---
+    raw_cves = _pick(data, "scannedCves", "ScannedCves", "VulnDetails",
+                     "VulnerabilityIDs", default={})
+    if isinstance(raw_cves, dict):
+        cve_items = list(raw_cves.values())
+        # dict keyed by CVE id: rebuild pairs
+        cve_items = [
+            {**v, "__id": _pick(v, "cveID", "cveId", "CveID", "CVEID",
+                                default=k)}
+            for k, v in raw_cves.items()
+        ]
+    elif isinstance(raw_cves, list):
+        cve_items = raw_cves
+    else:
+        cve_items = []
+    cve_items = [c for c in cve_items if isinstance(c, dict)]
+
+    # --- annotate severity + apply filter ---
+    for c in cve_items:
+        score_f, title, desc, links = _extract_cve_fields(c)
+        c["__score"] = score_f
+        c["__sev"] = _severity_from_score(score_f)
+        c["__title"] = title
+        c["__desc"] = desc
+        c["__links"] = links
+
+    min_sev = params.severity if params.severity != "all" else "unknown"
+    order = {s: i for i, s in enumerate(_SEVERITY_ORDER)}
+    sev_rank = order[min_sev] if min_sev in order else 5
+    filtered = [c for c in cve_items if order[c["__sev"]] <= sev_rank]
+
+    counts = {s: 0 for s in _SEVERITY_ORDER}
+    for c in cve_items:
+        counts[c["__sev"]] += 1
+    filtered.sort(key=lambda c: (-(c["__score"] or 0)))
+    shown = filtered[: params.max_results]
+
+    # --- header ---
+    if is_windows:
+        pkg_count_txt = (
+            f"{len(kb_applied)} 个已应用"
+            + (f"，{len(kb_unapplied)} 个缺失" if kb_unapplied else "")
+        )
+    else:
+        pkg_count_txt = f"{len(packages)} 个" + (
+            f"（{len(updatable)} 个有可用更新）" if updatable else ""
+        )
+
+    lines = [
+        f"# 🩺 系统补丁审计报告 — {params.host}",
+        "",
+        "| 项目 | 值 |",
+        "|---|---|",
+        f"| 系统 | {family} {release} |",
+        f"| 内核/Build | {kernel or 'n/a'} |",
+        f"| {pkg_label} | {pkg_count_txt} |",
+        f"| 漏洞总数 | {len(cve_items)} 个（未修复 CVE） |",
+        f"| 扫描时间 | {_pick(data, 'scannedAt', 'ScannedAt', 'reportedAt', default='n/a')} |",
+        "",
+    ]
+
+    if is_windows and kb_unapplied:
+        lines += [
+            "## 🚨 未安装的关键补丁（unapplied KB）",
+            "",
+            f"vuls 依据累积更新（rollup）规则判定以下 KB 应当已安装但缺失，"
+            f"共 {len(kb_unapplied)} 个（列出前 20）：",
+            "",
+        ]
+        lines += [f"- `KB{k}`" for k in kb_unapplied[:20]]
+        if len(kb_unapplied) > 20:
+            lines.append(f"- … 其余 {len(kb_unapplied) - 20} 个见完整数据")
+        lines.append("")
+
+    if not cve_items:
+        lines += [
+            "## ✅ 未发现未修复的已知 CVE",
+            "",
+            "已装补丁级别在漏洞数据库中没有匹配的未修复漏洞。"
+            "（数据库覆盖范围有限，不代表绝对安全。）",
+        ]
+        return "\n".join(lines)
+
+    # --- summary table ---
+    lines += ["## 📊 漏洞概览", "", "| 严重度 | 数量 |", "|---|---|"]
+    for s in _SEVERITY_ORDER:
+        if counts[s]:
+            lines.append(f"| {_SEVERITY_LABEL[s]} | {counts[s]} |")
+    if params.severity != "all":
+        lines.append("")
+        lines.append(f"（以下仅列出 ≥ {min_sev} 的漏洞，共 {len(filtered)} 个）")
+
+    # --- per-severity detail ---
+    for s in _SEVERITY_ORDER:
+        bucket = [c for c in shown if c["__sev"] == s]
+        if not bucket:
+            continue
+        lines += ["", f"## {_SEVERITY_LABEL[s]}（{counts[s]}）", ""]
+        for c in bucket:
+            cve_id = c.get("__id") or _pick(c, "cveID", "cveId", "CveID",
+                                            "CVEID", default="?")
+            title = c.get("__title") or _pick(c, "title", "Title", default="")
+            score = c["__score"]
+            lines.append(f"### {cve_id} — {title or '无标题'}")
+            for pkg in (_pick(c, "affectedPackages", "AffectedPackages",
+                              default=[]) or [])[:5]:
+                if not isinstance(pkg, dict):
+                    continue
+                pname = _pick(pkg, "name", "pkgName", "PkgName", default="?")
+                pver = _pick(pkg, "installedVersion", "InstalledVersion",
+                             "version", default="")
+                pfix = _pick(pkg, "fixedIn", "FixedIn", "fixedVersion",
+                             "FixedVersion", "newVersion", default="")
+                not_fixed = _pick(pkg, "notFixedYet", "NotFixedYet")
+                fix_txt = f"{pver} → {pfix}" if pfix else (
+                    f"{pver}（暂无修复版本）" if not_fixed
+                    else ("暂无修复版本" if not pver else pver)
+                )
+                lines.append(f"- 组件: `{pname}` — {fix_txt}")
+            if score:
+                lines.append(f"- CVSS: {score:g}")
+            desc = c.get("__desc") or _pick(c, "description", "Description",
+                                            default="")
+            if desc:
+                desc = desc.replace("\n", " ")
+                lines.append(f"- 描述: {desc[:300]}{'…' if len(desc) > 300 else ''}")
+            links = c.get("__links") or [
+                r.get("Link") or r.get("link") or ""
+                for r in (_pick(c, "references", "References", default=[])
+                          or [])[:3]
+                if isinstance(r, dict)
+            ]
+            links = [l for l in links if l][:3]
+            if links:
+                lines.append("- 参考: " + " · ".join(f"[{l}]({l})" for l in links))
+            lines.append("")
+
+    if len(filtered) > len(shown):
+        lines.append(
+            f"（另有 {len(filtered) - len(shown)} 条同级别以上漏洞未列出，"
+            f"完整数据见工作目录 `{workdir}`）"
+        )
+    return "\n".join(lines)
+
+
+# ===================================================================
 # Registry
 # ===================================================================
 

@@ -70,8 +70,9 @@
 | 密码爆破 | "用 rockyou 字典爆破 192.168.0.x 的 SSH" |
 | SSL 证书检查 | "查一下 example.com 的证书什么时候过期、SAN 覆盖哪些域名" |
 | HTTP 压测 | "对 http://target 发 1000 个请求（并发 10）看看 QPS 和延迟分布" |
+| 补丁比对 | "对比 192.168.0.100 这台 Windows 的补丁，找出还没修复的漏洞" |
 
-### 🔴 主动攻击（23 工具，额外 `ATTACK_ENABLED=true`）
+### 🔴 主动攻击（24 工具，额外 `ATTACK_ENABLED=true`）
 
 | 场景 | 对话示例 |
 |------|----------|
@@ -106,7 +107,7 @@
 └──────────────────┘                              ├──────────────────────────┤
                                                    │ 🟢 25 网络维护 (默认)    │
                                                    │ 🟡 14 渗透侦察 (可开关)  │
-                                                   │ 🔴 23 主动攻击 (可开关)   │
+                                                   │ 🔴 24 主动攻击 (可开关)   │
                                                    └──────────────────────────┘
 ```
 
@@ -147,7 +148,7 @@ EOF
 # 开启 🟡 渗透侦察模块（+14 工具，漏洞扫描/爆破/SNMP/证书检查等）
 sed -i 's/^PENTEST_ENABLED=.*/PENTEST_ENABLED=true/' .env
 
-# 开启 🔴 主动攻击模块（+23 工具，SQL注入/中间人/WiFi破解等）
+# 开启 🔴 主动攻击模块（+24 工具，SQL注入/中间人/WiFi破解/补丁比对等）
 sed -i 's/^ATTACK_ENABLED=.*/ATTACK_ENABLED=true/' .env
 ```
 
@@ -519,6 +520,7 @@ sudo nmcli connection up "有线连接 1"
 | 60 | `ettercap_mitm` | ettercap | 🔴 | Ettercap ARP 投毒 + 协议嗅探 |
 | 61 | `bettercap_mitm` | bettercap | 🔴 | Bettercap HTTP/HTTPS 中间人 |
 | 62 | `sslstrip_run` | sslstrip | 🔴 | SSL 剥离攻击（HTTPS→HTTP） |
+| 63 | `system_patch_audit` | vuls | 🔴 | 补丁比对找漏洞（Windows KB/热修复 + Linux 包 vs CVE 库） |
 
 ---
 
@@ -543,6 +545,9 @@ ATTACK_ENABLED=true  ──→ 🔴 攻击工具    (需二次开关)
 | `PENTEST_ENABLED` | `false` | 渗透侦察模块 |
 | `ATTACK_ENABLED` | `false` | 主动攻击模块 |
 | `NUCLEI_TEMPLATES_DIR` | 空(自动探测) | nuclei 模板目录，模板在非默认位置时设置（如 `/home/xhj/.local/nuclei-templates`） |
+| `VULS_BIN` | 自动查找 | vuls 二进制路径（默认 PATH 查找） |
+| `VULS_SSH_SHIM_DIR` | `/usr/local/lib/kali-mcp-vuls/bin` | sshpass ssh 包装器目录（密码认证用） |
+| `VULS2_DB_PATH` | `/var/lib/kali-mcp-vuls/vuls.db` | vuls2 漏洞数据库（~12GB，首次自动下载） |
 | `DEFAULT_TIMEOUT` | `120` | 命令超时(秒) |
 
 ---

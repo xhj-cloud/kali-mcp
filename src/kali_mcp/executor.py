@@ -39,6 +39,7 @@ class CommandExecutor:
         timeout: int | None = None,
         input_data: str | None = None,
         hold_stdin: bool = False,
+        env: dict[str, str] | None = None,
     ) -> CommandResult:
         """Execute a command and return its output.
 
@@ -52,6 +53,10 @@ class CommandExecutor:
                 deliver EOF and make them exit immediately without doing
                 anything. The command then runs until it exits on its own or
                 the timeout kills it.
+            env: Optional extra environment variables. Merged over the
+                current process environment (e.g. PATH shim + secret
+                variables for tools that read credentials from the
+                environment instead of the command line).
 
         Returns:
             CommandResult with captured stdout, stderr, and exit code
@@ -60,12 +65,19 @@ class CommandExecutor:
         cmd_str = " ".join(cmd)
         logger.info("Executing: %s (timeout=%ds)", cmd_str, timeout)
 
+        full_env: dict[str, str] | None = None
+        if env is not None:
+            import os
+
+            full_env = {**os.environ, **env}
+
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 stdin=asyncio.subprocess.PIPE,
+                env=full_env,
             )
 
             # Stream both pipes into chunk lists as data arrives. Unlike
