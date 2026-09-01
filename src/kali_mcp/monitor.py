@@ -113,6 +113,11 @@ async def network_diff(params: NetworkDiffInput) -> str:
 
     # 1. Resolve subnet (explicit value wins, else auto-detect)
     subnet = await detect_subnet(executor, params.subnet)
+    if subnet is None:
+        return (
+            "❌ 无法自动探测本机子网（默认路由网卡未找到 IPv4 地址）。\n"
+            "请通过 subnet 参数显式指定要扫描的网段（如 192.168.1.0/24）。"
+        )
 
     # 2. Run ARP scan
     arp_cmd = ["arp-scan", subnet]

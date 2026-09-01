@@ -1106,7 +1106,11 @@ async def ipv6_scan(params: Ipv6ScanInput) -> str:
     else:
         # auto mode: v4 ARP cross-reference
         subnet4 = await detect_subnet(executor)
-        _, v4_devices = await arp_scan_devices(executor, subnet4)
+        if subnet4:
+            _, v4_devices = await arp_scan_devices(executor, subnet4)
+        else:
+            v4_devices = []
+            raw_parts.append("（无法自动探测本机 IPv4 网段，跳过 v4 ARP 对照）")
         v4_by_mac = {d["mac"]: d["ip"] for d in v4_devices}
         if params.auto_sweep:
             prefixes = await _own_v6_sweep_prefixes(executor)

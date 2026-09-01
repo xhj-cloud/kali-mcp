@@ -12,7 +12,6 @@ import asyncio
 
 from kali_mcp.executor import CommandResult
 from kali_mcp.netinfo import (
-    DEFAULT_SUBNET,
     arp_class_stats_lines,
     arp_mermaid_lines,
     arp_scan_devices,
@@ -124,17 +123,19 @@ class TestDetectSubnet:
         )
         assert run(detect_subnet(ex, "")) == "192.168.0.0/24"
 
-    def test_falls_back_to_default_subnet(self):
+    def test_detection_failure_returns_none(self):
+        """No hardcoded fallback subnet: when auto-detect fails the caller
+        must ask for an explicit subnet instead of assuming a network."""
         # ip route gives an iface but ip addr has no inet line
         ex = FakeExecutor({"route": "default via 192.168.0.1 dev eth0", "addr": ""})
-        assert run(detect_subnet(ex, None)) == DEFAULT_SUBNET
+        assert run(detect_subnet(ex, None)) is None
 
-    def test_bad_inet_falls_back(self):
+    def test_bad_inet_returns_none(self):
         ex = FakeExecutor(
             {"route": "default via 192.168.0.1 dev eth0",
              "addr": "inet not-an-address scope global eth0"}
         )
-        assert run(detect_subnet(ex, None)) == DEFAULT_SUBNET
+        assert run(detect_subnet(ex, None)) is None
 
 
 class TestDetectGateway:
@@ -151,6 +152,12 @@ class TestDetectGateway:
             {"route": "default dev eth0", "addr": SAMPLE_IP_ADDR}
         )
         assert run(detect_gateway(ex, None)) == "192.168.0.1"
+
+    def test_no_via_no_target_detection_failed_returns_empty(self):
+        """Nothing to fall back on → empty string; callers surface a
+        request for an explicit gateway instead of guessing .1."""
+        ex = FakeExecutor({"route": "default dev eth0", "addr": ""})
+        assert run(detect_gateway(ex, None)) == ""
 
 
 # ---------------------------------------------------------------------------

@@ -29,9 +29,6 @@ from kali_mcp.executor import CommandResult
 
 logger = logging.getLogger(__name__)
 
-#: 探测失败时的兜底子网
-DEFAULT_SUBNET = "192.168.0.0/24"
-
 
 # ---------------------------------------------------------------------------
 # Detection: interface / subnet / gateway
@@ -45,12 +42,13 @@ async def detect_default_iface(executor) -> str:
     return m.group(1) if m else "eth0"
 
 
-async def detect_subnet(executor, subnet: str | None = None) -> str:
+async def detect_subnet(executor, subnet: str | None = None) -> str | None:
     """Resolve the subnet to scan.
 
     An explicit non-empty ``subnet`` always wins. Otherwise auto-detect:
     default-route interface → its IPv4 address → network CIDR.
-    Falls back to :data:`DEFAULT_SUBNET` if detection fails.
+    Returns ``None`` when detection fails — callers must surface that as a
+    request for an explicit subnet rather than assuming any network.
     """
     if subnet and subnet.strip():
         return subnet.strip()
@@ -65,15 +63,17 @@ async def detect_subnet(executor, subnet: str | None = None) -> str:
             logger.warning(
                 "Cannot parse IPv4 network from %r (iface %s)", m.group(1), iface
             )
-    logger.warning("Subnet auto-detect failed; falling back to %s", DEFAULT_SUBNET)
-    return DEFAULT_SUBNET
+    logger.warning("Subnet auto-detect failed (iface %s)", iface)
+    return None
 
 
 async def detect_gateway(executor, target: str | None = None) -> str:
     """Gateway IP: the ``via`` address of the default route.
 
     Falls back to ``<target 的网段>.1`` (or the detected subnet's ``.1``
-    when no target is given).
+    when no target is given). Returns ``""`` when no gateway can be
+    determined — callers must treat that as "ask the user for an explicit
+    gateway" rather than guessing.
     """
     r = await executor.run(["ip", "route", "show", "default"])
     m = re.search(r"via\s+(\S+)", r.stdout)
@@ -81,9 +81,11 @@ async def detect_gateway(executor, target: str | None = None) -> str:
         return m.group(1)
     if target:
         base = target.rsplit(".", 1)[0]
-    else:
-        base = (await detect_subnet(executor)).rsplit(".", 1)[0]
-    return base + ".1"
+        return base + ".1"
+    detected = await detect_subnet(executor)
+    if not detected:
+        return ""
+    return detected.rsplit(".", 1)[0] + ".1"
 
 
 # ---------------------------------------------------------------------------
