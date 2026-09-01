@@ -743,26 +743,51 @@ async def nuclei_results(_params: NucleiResultsInput = None) -> str:
     with open(outfile, "r") as f:
         raw = f.read().strip()
 
+    # Freshness: the file outlives individual scans, so always say when it
+    # was last written — an old file must not be mistaken for a current scan.
+    mtime = datetime.fromtimestamp(
+        os.path.getmtime(outfile)
+    ).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+
     findings = [l.strip() for l in raw.split("\n") if l.strip()
                 and l.strip().startswith("[")
                 and not l.strip().startswith("[INF]")
                 and not l.strip().startswith("[WRN]")
                 and not l.strip().startswith("[FTL]")]
 
-    # Check if scan is still running (no output at all, or only stats)
-    non_stats = [l for l in raw.split("\n") if l.strip() and not l.strip().startswith("[INF]")]
-    done = not raw.endswith("[INF]") if raw else False
+    # nuclei v3 writes a terminal "[INF] Scan finished ..." /
+    # "[INF] Scan completed in ...s. N matches found." line — that (not the
+    # presence of any non-INF line; the banner appears seconds after start)
+    # is the reliable completion marker.
+    finished = bool(re.search(r"\[INF\] Scan (?:finished|completed)", raw))
 
-    if not raw or (not non_stats and not done):
-        return "## Nuclei Scan In Progress\n\nScan still running. Check again later."
+    if not raw or not finished:
+        return (
+            "## Nuclei Scan In Progress\n\n"
+            f"**Results file last updated:** {mtime}\n\n"
+            "Scan still running. Check again later."
+        )
 
     if not findings:
         if "[FTL]" in raw:
             err_lines = [l for l in raw.split("\n") if "[FTL]" in l]
-            return f"## Nuclei Error\n\n```\n{chr(10).join(err_lines[:3])}\n```"
-        return "## Nuclei Scan Complete\n\n**Findings:** 0\n\nNo vulnerabilities found for this target/filter combination."
+            return (
+                f"## Nuclei Error\n\n"
+                f"**Results file last updated:** {mtime}\n\n"
+                f"```\n{chr(10).join(err_lines[:3])}\n```"
+            )
+        return (
+            "## Nuclei Scan Complete\n\n"
+            f"**Results file last updated:** {mtime}\n\n"
+            "**Findings:** 0\n\n"
+            "No vulnerabilities found for this target/filter combination."
+        )
 
-    result = f"## Nuclei Scan Complete\n\n**Findings:** {len(findings)}\n\n"
+    result = (
+        f"## Nuclei Scan Complete\n\n"
+        f"**Results file last updated:** {mtime}\n\n"
+        f"**Findings:** {len(findings)}\n\n"
+    )
     result += "```\n" + "\n".join(findings[:50]) + "\n```\n"
     return result
 

@@ -83,6 +83,28 @@ def _is_valid_domain(v: str) -> bool:
 # ---------------------------------------------------------------------------
 
 _MAX_OUTPUT = 8000
+_MAX_STDERR = 2000
+
+
+def _truncate(text: str, limit: int = _MAX_OUTPUT) -> str:
+    """Truncate long output, keeping BOTH the head and the tail.
+
+    Scan tools (nmap, nikto, ffuf, ...) emit their findings at the END of
+    the output, while the useful context (open ports, service versions)
+    sits at the start — a plain head cut would hide the findings. Keep
+    ~40% head + ~60% tail with an explicit omission marker.
+    """
+    if len(text) <= limit:
+        return text
+    head = int(limit * 0.4)
+    tail = limit - head
+    omitted_lines = text.count("\n", head, len(text) - tail)
+    omitted_bytes = len(text) - head - tail
+    return (
+        text[:head]
+        + f"\n... [{omitted_lines} lines / {omitted_bytes} bytes truncated] ...\n"
+        + text[-tail:]
+    )
 
 
 def _fmt(
@@ -101,15 +123,13 @@ def _fmt(
         "",
     ]
     if result.stdout:
-        out = result.stdout[:_MAX_OUTPUT]
-        truncated = " ... (truncated)" if len(result.stdout) > _MAX_OUTPUT else ""
         lines.append("```")
-        lines.append(out + truncated)
+        lines.append(_truncate(result.stdout))
         lines.append("```")
     else:
         lines.append("_(no output)_")
     if result.stderr:
-        lines.append(f"\n**Diagnostics:**\n```\n{result.stderr[:2000]}\n```")
+        lines.append(f"\n**Diagnostics:**\n```\n{result.stderr[:_MAX_STDERR]}\n```")
     return "\n".join(lines)
 
 
@@ -494,8 +514,9 @@ async def ping_host(params: PingInput) -> str:
     cmd = [
         "ping",
         "-c", str(params.count),
-        # iputils ping 的 -W 单位是毫秒；参数语义是秒，需换算
-        "-W", str(params.timeout * 1000),
+        # iputils ping 的 -W 单位是秒（新版 iputils 会严格校验取值，
+        # 传入毫秒级数值会被拒绝："bad linger time"）
+        "-W", str(params.timeout),
         params.target,
     ]
 
@@ -756,7 +777,11 @@ async def tcpdump_capture(params: TcpdumpInput) -> str:
 
     Requires: tcpdump (pre-installed on Kali)
     """
+    # Bound the capture at `duration`: SIGINT makes tcpdump flush and exit
+    # cleanly (all packet lines already written with -l); -c count still
+    # ends it early when the quota is met. Same pattern as traffic_stats.
     cmd = [
+        "timeout", "-s", "INT", str(params.duration),
         "tcpdump",
         "-i", params.interface,
         "-c", str(params.count),
@@ -769,11 +794,29 @@ async def tcpdump_capture(params: TcpdumpInput) -> str:
     if params.filter_expr:
         cmd.extend(params.filter_expr.split())
 
-    timeout = params.duration + 5
+    timeout = params.duration + 10
     executor = get_executor(timeout=timeout)
     result = await executor.run(cmd, timeout=timeout)
 
-    desc = f"if={params.interface}, count={params.count}"
+    # rc 124 = the duration limit was hit. If any packets were captured,
+    # that's a partial success — report it as such, not "Failed".
+    if result.returncode == 124 and result.stdout:
+        result.success = True
+        result.returncode = 0
+        result.stdout = (
+            f"Note: capture stopped at the {params.duration}s duration limit "
+            f"before reaching {params.count} packets (partial capture):\n"
+            + result.stdout
+        )
+    elif result.returncode == 124:
+        # Duration elapsed with zero packets — say so plainly.
+        result.stderr = (
+            f"No packets captured within the {params.duration}s duration — "
+            f"the interface was idle or the filter matched nothing."
+            + (f"\n{result.stderr}" if result.stderr else "")
+        )
+
+    desc = f"if={params.interface}, duration={params.duration}s, count={params.count}"
     if params.filter_expr:
         desc += f", filter='{params.filter_expr}'"
     return _fmt("tcpdump Capture", desc, " ".join(cmd), result)
