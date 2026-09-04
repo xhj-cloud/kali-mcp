@@ -1,9 +1,10 @@
 """
 Kali Linux IPv6 network maintenance tools.
 
-Ten 🟢 IPv6 diagnostics, always enabled. The original six are
-single-host / remote checks; the four added tools cover LAN-level
-discovery and end-to-end diagnosis:
+Ten 🟢 IPv6 diagnostics (always enabled) plus two 🟡 active-recon
+tools (PENTEST_ENABLED). The original six are single-host / remote
+checks; the four added 🟢 tools cover LAN-level discovery and
+end-to-end diagnosis; the two 🟡 tools are the pentest tier:
 
   1. ipv6_status     — IPv6 overview: per-interface addresses (incl.
                        config-source analysis: SLAAC / DHCPv6 / static),
@@ -23,13 +24,22 @@ discovery and end-to-end diagnosis:
   9. ipv6_ra_inspect — passive Router Advertisement listener: what prefixes
                        does the router actually advertise (SLAAC/DHCPv6)?
  10. ipv6_route_debug— `ip -6 route get` source-address selection diagnosis
+ 11. ipv6_recon      — 🟡 active IPv6 recon: rdisc6 router discovery
+                       (advertised prefixes / RDNSS / NAT64) + passive NDP
+                       + MAC→SLAAC EUI-64 address guessing (verified by
+                       parallel ping) + optional bounded nmap -sn sweep
+ 12. ipv6_service_scan — 🟡 nmap -6 -sV -sC service/version/NSE-script
+                       scan of v6 hosts (single address or /80-or-smaller
+                       CIDR — /64 = 2^64 hosts, full scan infeasible)
 
 Requires: iproute2, iputils-ping, traceroute, dnsutils, ip6tables/nftables,
-nmap, tcpdump, curl — all pre-installed on a standard Kali install.
+nmap, tcpdump, curl — all pre-installed on a standard Kali install;
+rdisc6 (package ``ndisc6``) for ipv6_recon.
 """
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import re
 from typing import Optional
@@ -319,6 +329,36 @@ async def _own_v6_sweep_prefixes(executor) -> list[str]:
     return targets
 
 
+def _validate_v6_subnet(v: Optional[str]) -> Optional[str]:
+    """Validate an optional active-scan target.
+
+    Accepts a bare IPv6 address or a CIDR of /80 or smaller (a /64 holds
+    2^64 addresses — a full sweep is infeasible, so larger prefixes are
+    rejected). Shared by Ipv6ScanInput and Ipv6ReconInput.
+    """
+    if v is None or v.strip() == "":
+        return None
+    v = _no_shell_meta(v)
+    bare = v.split("%", 1)[0]
+    try:
+        if "/" in bare:
+            net = ipaddress.IPv6Network(bare, strict=False)
+            if net.prefixlen < 80:
+                raise ValueError(
+                    f"扫描前缀太大（/{net.prefixlen}）：/64 有 2^64 个地址无法全扫，"
+                    "请指定 /80 或更小的前缀，或留空用自动模式"
+                )
+        else:
+            ipaddress.IPv6Address(bare)
+    except ValueError as e:
+        if "太大" in str(e):
+            raise ValueError(str(e))
+        raise ValueError(
+            "必须是有效 IPv6 地址或 /80 或更小的 CIDR（如 fd00:beef::/80）"
+        ) from None
+    return v
+
+
 # Public IPv6 DNS used by the automatic reachability check.
 PUBLIC_IPV6_DNS: list[tuple[str, str]] = [
     ("Google", "2001:4860:4860::8888"),
@@ -442,27 +482,7 @@ class Ipv6ScanInput(BaseModel):
     @field_validator("subnet")
     @classmethod
     def _v_subnet(cls, v: Optional[str]) -> Optional[str]:
-        if v is None or v.strip() == "":
-            return None
-        v = _no_shell_meta(v)
-        bare = v.split("%", 1)[0]
-        try:
-            if "/" in bare:
-                net = ipaddress.IPv6Network(bare, strict=False)
-                if net.prefixlen < 80:
-                    raise ValueError(
-                        f"扫描前缀太大（/{net.prefixlen}）：/64 有 2^64 个地址无法全扫，"
-                        "请指定 /80 或更小的前缀，或留空用自动模式"
-                    )
-            else:
-                ipaddress.IPv6Address(bare)
-        except ValueError as e:
-            if "太大" in str(e):
-                raise ValueError(str(e))
-            raise ValueError(
-                "subnet 必须是有效 IPv6 地址或 /80 或更小的 CIDR（如 fd00:beef::/80）"
-            ) from None
-        return v
+        return _validate_v6_subnet(v)
 
     @field_validator("interface")
     @classmethod
@@ -1548,6 +1568,854 @@ async def ipv6_route_debug(params: Ipv6RouteDebugInput) -> str:
 
 
 # ===================================================================
+# 11. ipv6_recon — 🟡 active IPv6 penetration recon (PENTEST_ENABLED)
+# ===================================================================
+#  A /64 holds 2^64 addresses, so "sweep everything" is infeasible;
+#  active discovery has to lean on router discovery (rdisc6), passive
+#  NDP, MAC→SLAAC EUI-64 guessing, and bounded small-prefix sweeps.
+
+
+_RDISC_ROUTER_RE = re.compile(r"received from\s+([0-9A-Fa-f:]+)", re.I)
+
+
+def _rdisc_int(line: str) -> Optional[int]:
+    """First integer after the ':' in a rdisc6 label line."""
+    m = re.search(r":\s*(\d+)", line)
+    return int(m.group(1)) if m else None
+
+
+def _rdisc_bool(line: str) -> Optional[bool]:
+    """valid/invalid value in a rdisc6 label line."""
+    low = line.lower()
+    if "invalid" in low:
+        return False
+    if "valid" in low:
+        return True
+    return None
+
+
+def _parse_rdisc_output(output: str) -> list[dict]:
+    """Parse verbose ``rdisc6`` output → one dict per router advertisement.
+
+    Field labels are taken from rdisc6 1.0.x (ndisc6 package). Each router:
+    ``src, hop_limit, stateful_addr, stateful_other, mha, proxy, pref,
+    lifetime (int | 'infinite' | None), reachable, retrans, lla, mtu,
+    prefixes[{prefix, plen, onlink, autoconf, valid, pref}],
+    routes[{prefix, plen, pref, lifetime}], rdns[{server, lifetime}],
+    search_lists[{list, lifetime}], nat64[{prefix, plen, lifetime}]``.
+    """
+    routers: list[dict] = []
+    cur: dict | None = None
+    cur_prefix: dict | None = None
+    cur_route: dict | None = None
+    cur_rdns: dict | None = None
+    cur_search: dict | None = None
+    cur_nat64: dict | None = None
+
+    def _new_router(src: str) -> None:
+        nonlocal cur, cur_prefix, cur_route, cur_rdns, cur_search, cur_nat64
+        if cur is not None:
+            routers.append(cur)
+        cur = {
+            "src": src,
+            "hop_limit": None,
+            "stateful_addr": None,
+            "stateful_other": None,
+            "mha": None,
+            "proxy": None,
+            "pref": None,
+            "lifetime": None,
+            "reachable": None,
+            "retrans": None,
+            "lla": None,
+            "mtu": None,
+            "prefixes": [],
+            "routes": [],
+            "rdns": [],
+            "search_lists": [],
+            "nat64": [],
+        }
+        cur_prefix = cur_route = cur_rdns = cur_search = cur_nat64 = None
+
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(
+            ("Soliciting", "Timed out", "No response")
+        ):
+            continue
+        m = _RDISC_ROUTER_RE.search(line)
+        if m:
+            _new_router(m.group(1))
+            continue
+        # Fallback header: an unindented line ending in an IPv6 address that
+        # we did not recognise (works even for the very first line).
+        if cur is None:
+            if not line[:1].isspace():
+                m2 = re.search(r"([0-9A-Fa-f:]+)$", stripped)
+                if m2 and ":" in m2.group(1):
+                    _new_router(m2.group(1))
+            continue
+
+        low = stripped.lower()
+
+        def _cidr() -> Optional[re.Match]:
+            return re.search(r"([0-9A-Fa-f:]+)/(\d+)", line)
+
+        def _value() -> str:
+            return stripped.split(":", 1)[1].strip() if ":" in stripped else ""
+
+        if re.match(r"^prefix\b", low):
+            mc = _cidr()
+            if mc:
+                cur_prefix = {
+                    "prefix": mc.group(1),
+                    "plen": int(mc.group(2)),
+                    "onlink": None,
+                    "autoconf": None,
+                    "valid": None,
+                    "pref": None,
+                }
+                cur["prefixes"].append(cur_prefix)
+        elif re.match(r"^on-link\b", low) and cur_prefix is not None:
+            cur_prefix["onlink"] = _rdisc_bool(line)
+        elif re.match(r"^autonomous address conf", low) and cur_prefix is not None:
+            cur_prefix["autoconf"] = _rdisc_bool(line)
+        elif re.match(r"^valid time\b", low) and cur_prefix is not None:
+            cur_prefix["valid"] = _rdisc_int(line)
+        elif re.match(r"^pref\.?\s*time\b", low) and cur_prefix is not None:
+            cur_prefix["pref"] = _rdisc_int(line)
+        elif re.match(r"^route preference\b", low) and cur_route is not None:
+            cur_route["pref"] = _value()
+        elif re.match(r"^route lifetime\b", low) and cur_route is not None:
+            cur_route["lifetime"] = _rdisc_int(line)
+        elif re.match(r"^route\b", low):
+            mc = _cidr()
+            if mc:
+                cur_route = {
+                    "prefix": mc.group(1),
+                    "plen": int(mc.group(2)),
+                    "pref": None,
+                    "lifetime": None,
+                }
+                cur["routes"].append(cur_route)
+        elif re.match(r"^recursive dns server\b", low):
+            cur_rdns = {"server": _value(), "lifetime": None}
+            cur["rdns"].append(cur_rdns)
+        elif re.match(r"^dns search list lifetime\b", low) and cur_search is not None:
+            cur_search["lifetime"] = _rdisc_int(line)
+        elif re.match(r"^dns search list\b", low):
+            cur_search = {"list": _value(), "lifetime": None}
+            cur["search_lists"].append(cur_search)
+        elif re.match(r"^dns servers? lifetime\b", low) and cur_rdns is not None:
+            cur_rdns["lifetime"] = _rdisc_int(line)
+        elif re.match(r"^nat64 prefix lifetime\b", low) and cur_nat64 is not None:
+            cur_nat64["lifetime"] = _rdisc_int(line)
+        elif re.match(r"^nat64 prefix\b", low):
+            mc = _cidr()
+            if mc:
+                cur_nat64 = {
+                    "prefix": mc.group(1),
+                    "plen": int(mc.group(2)),
+                    "lifetime": None,
+                }
+                cur["nat64"].append(cur_nat64)
+        elif re.match(r"^hop limit\b", low):
+            cur["hop_limit"] = _rdisc_int(line)
+        elif re.match(r"^stateful address conf", low):
+            cur["stateful_addr"] = _rdisc_bool(line)
+        elif re.match(r"^stateful other conf", low):
+            cur["stateful_other"] = _rdisc_bool(line)
+        elif re.match(r"^mobile home agent", low):
+            cur["mha"] = _rdisc_bool(line)
+        elif re.match(r"^neighbor discovery proxy", low):
+            cur["proxy"] = _rdisc_bool(line)
+        elif re.match(r"^router preference\b", low):
+            cur["pref"] = _value()
+        elif re.match(r"^router lifetime\b", low):
+            cur["lifetime"] = "infinite" if "infinite" in low else _rdisc_int(line)
+        elif re.match(r"^reachable time\b", low):
+            cur["reachable"] = _rdisc_int(line)
+        elif re.match(r"^retransmit time\b", low):
+            cur["retrans"] = _rdisc_int(line)
+        elif re.match(r"^source link-layer address\b", low):
+            m2 = re.search(r"([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})", line)
+            cur["lla"] = m2.group(1).upper() if m2 else None
+        elif re.match(r"^mtu\b", low):
+            cur["mtu"] = _rdisc_int(line)
+        else:
+            # Fallback: an unindented line ending in an IPv6 address is a
+            # router header we did not recognise.
+            if not line[:1].isspace():
+                m2 = re.search(r"([0-9A-Fa-f:]+)$", stripped)
+                if m2 and ":" in m2.group(1):
+                    _new_router(m2.group(1))
+    if cur is not None:
+        routers.append(cur)
+    return routers
+
+
+_NMAP6_HOST_RE = re.compile(r"^Nmap scan report for\s+(.+)$")
+_NMAP6_PORT_RE = re.compile(r"^(\S+)\s+(open|filtered)\s+(\S+)\s*(.*)$")
+
+
+def _parse_nmap6_service(output: str) -> list[dict]:
+    """Parse ``nmap -6 -sV -sC`` output → host dicts.
+
+    Each host: ``host, up, not_shown, ports[{port, proto, state, service,
+    version, scripts[]}], service_info[], mac``.
+    """
+    hosts: list[dict] = []
+    cur: dict | None = None
+    cur_port: dict | None = None
+    for line in output.splitlines():
+        m = _NMAP6_HOST_RE.match(line)
+        if m:
+            if cur is not None:
+                hosts.append(cur)
+            cur = {
+                "host": m.group(1).strip(),
+                "up": None,
+                "not_shown": "",
+                "ports": [],
+                "service_info": [],
+                "mac": "",
+            }
+            cur_port = None
+            continue
+        if cur is None:
+            continue
+        if line.startswith("Host is up"):
+            cur["up"] = True
+            continue
+        if line.startswith("Host does not appear to be up"):
+            cur["up"] = False
+            continue
+        if line.startswith("Not shown:"):
+            cur["not_shown"] = line[len("Not shown:"):].strip()
+            continue
+        if line.startswith("MAC Address:"):
+            m2 = re.search(r"([0-9A-Fa-f:]{17})", line)
+            if m2:
+                cur["mac"] = m2.group(1).upper()
+            continue
+        if line.startswith("Service Info:"):
+            cur["service_info"].append(line[len("Service Info:"):].strip())
+            continue
+        if line.lstrip().startswith("|"):
+            if cur_port is not None:
+                entry = line.strip().lstrip("|_").strip()
+                cur_port["scripts"].append(entry or line.strip())
+            continue
+        m = _NMAP6_PORT_RE.match(line.strip())
+        if m and "/" in m.group(1):
+            port, proto = m.group(1).split("/", 1)
+            cur_port = {
+                "port": port,
+                "proto": proto,
+                "state": m.group(2),
+                "service": m.group(3),
+                "version": m.group(4).strip(),
+                "scripts": [],
+            }
+            cur["ports"].append(cur_port)
+    if cur is not None:
+        hosts.append(cur)
+    return hosts
+
+
+def _mac_to_eui64_iid(mac: str) -> Optional[str]:
+    """MAC AA:BB:CC:DD:EE:FF → EUI-64 interface id (u/l bit flipped).
+
+    ``00:1a:2b:3c:4d:5e`` → ``011a:2bff:fe3c:4d5e``. None if malformed.
+    """
+    if not re.fullmatch(r"([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", mac):
+        return None
+    b = bytes.fromhex(mac.replace(":", ""))
+    b0 = b[0] ^ 0x01
+    return f"{b0:02x}{b[1]:02x}:{b[2]:02x}ff:fe{b[3]:02x}:{b[4]:02x}{b[5]:02x}"
+
+
+def _slaac_candidate(prefix: str, iid: str) -> str:
+    """Combine a /64 network with an EUI-64 iid → candidate SLAAC address."""
+    net = ipaddress.IPv6Network(prefix, strict=False)
+    iid_int = int(iid.replace(":", ""), 16)
+    return str(ipaddress.IPv6Address(int(net.network_address) | iid_int))
+
+
+async def _local_v6_prefixes(executor) -> list[tuple[str, str]]:
+    """``(prefix, iface)`` for this host's global/ULA subnets (prefixlen ≤ 64).
+
+    A /64 is the SLAAC unit: interface prefixes smaller than /64 are
+    collapsed to the /64 containing their address; link-local / loopback /
+    point-to-point (/128) addresses are skipped.
+    """
+    r = await executor.run(["ip", "-6", "addr", "show"])
+    out: list[tuple[str, str]] = []
+    if not r.success:
+        return out
+    seen: set[str] = set()
+    iface = ""
+    for line in r.stdout.splitlines():
+        m_if = re.match(r"^\d+:\s+([^:]+):", line)
+        if m_if:
+            iface = m_if.group(1)
+            continue
+        m_addr = re.match(r"\s+inet6\s+(\S+)", line)
+        if not m_addr or iface in ("", "lo"):
+            continue
+        try:
+            intf = ipaddress.ip_interface(m_addr.group(1))
+        except ValueError:
+            continue
+        net = intf.network
+        if net.prefixlen < 64:
+            net = ipaddress.IPv6Network((intf.ip, 64))
+        if (
+            net.prefixlen > 64
+            or net.is_link_local
+            or net.is_loopback
+        ):
+            continue
+        key = str(net)
+        if key not in seen:
+            seen.add(key)
+            out.append((key, iface))
+    return out
+
+
+_V4_NEIGH_RE = re.compile(
+    r"^(\d+\.\d+\.\d+\.\d+)\s+dev\s+\S+\s+lladdr\s+([0-9A-Fa-f:]{17})"
+)
+
+
+async def _v4_neigh_macs(executor) -> dict[str, str]:
+    """Passive IPv4 neighbour table → {MAC(upper): v4-ip}."""
+    r = await executor.run(["ip", "neigh", "show"])
+    macs: dict[str, str] = {}
+    if not r.success:
+        return macs
+    for line in r.stdout.splitlines():
+        m = _V4_NEIGH_RE.match(line)
+        if m:
+            macs.setdefault(m.group(2).upper(), m.group(1))
+    return macs
+
+
+# ---------------------------------------------------------------------------
+# Pydantic input models (🟡 tier)
+# ---------------------------------------------------------------------------
+
+
+class Ipv6ReconInput(BaseModel):
+    """Input for active IPv6 penetration recon."""
+
+    subnet: Optional[str] = Field(
+        None,
+        description=(
+            "可选的额外有界扫描：/80 或更小的 IPv6 CIDR（如 fd00:beef::/80）或单个 "
+            "IPv6 地址，对其跑 nmap -6 -sn；留空则跳过"
+        ),
+        max_length=64,
+    )
+    interface: Optional[str] = Field(
+        None,
+        description="rdisc6 路由器发现所用网卡（如 eth0）；留空 = 自动探测默认路由网卡",
+        max_length=32,
+    )
+    slaac_guess: bool = Field(
+        True,
+        description="MAC→SLAAC 地址猜测：用 IPv4 ARP 表里的 MAC 推导 EUI-64 SLAAC 地址并并发 ping 验证（默认开）",
+    )
+    slaac_max: int = Field(
+        32, ge=1, le=128, description="最多猜测多少个 MAC（默认 32）"
+    )
+    timeout: int = Field(
+        300, ge=30, le=600, description="有界扫描超时（秒，默认 300）"
+    )
+
+    @field_validator("subnet")
+    @classmethod
+    def _v_subnet(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_v6_subnet(v)
+
+    @field_validator("interface")
+    @classmethod
+    def _v_iface(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or v.strip() == "":
+            return None
+        v = _no_shell_meta(v)
+        if not re.match(r"^[A-Za-z0-9._-]{1,32}$", v):
+            raise ValueError("invalid interface name")
+        return v
+
+
+class Ipv6ServiceScanInput(BaseModel):
+    """Input for IPv6 service scanning."""
+
+    target: str = Field(
+        ...,
+        description=(
+            "目标 IPv6 地址（如 2408:4000:1::1）或 /80 或更小的 CIDR（如 "
+            "2408:4000:1::/90）；先用 ipv6_recon 发现地址"
+        ),
+        min_length=1,
+        max_length=64,
+    )
+    ports: Optional[str] = Field(
+        None,
+        description='端口规格："80,443"、"1-1024"、"top-100"；留空 = nmap 默认（top 1000）',
+        max_length=256,
+    )
+    service_version: bool = Field(
+        True, description="服务/版本探测（-sV，默认开，较慢）"
+    )
+    scripts: bool = Field(
+        True, description="跑默认 NSE 脚本（-sC，默认开）"
+    )
+    timing: str = Field("T4", description="Timing 模板 T1-T5（默认 T4）")
+    timeout: int = Field(
+        300, ge=30, le=900, description="扫描超时（秒，默认 300）"
+    )
+
+    @field_validator("target")
+    @classmethod
+    def _v_target(cls, v: str) -> str:
+        v = _no_shell_meta(v)
+        bare = v.split("%", 1)[0]
+        try:
+            if "/" in bare:
+                net = ipaddress.IPv6Network(bare, strict=False)
+                if net.prefixlen < 80:
+                    raise ValueError(
+                        f"扫描前缀太大（/{net.prefixlen}）：/64 有 2^64 个地址无法全扫，"
+                        "请指定 /80 或更小的前缀或单个地址"
+                    )
+            else:
+                ipaddress.IPv6Address(bare)
+        except ValueError as e:
+            if "太大" in str(e):
+                raise ValueError(str(e))
+            raise ValueError(
+                "target 必须是有效 IPv6 地址或 /80 或更小的 CIDR"
+            ) from None
+        return v
+
+    @field_validator("ports")
+    @classmethod
+    def _v_ports(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or v.strip() == "":
+            return None
+        v = _no_shell_meta(v).strip()
+        if not re.fullmatch(r"top-\d+|\d[\d,\-]*", v):
+            raise ValueError('ports 形如 "80,443"、"1-1024" 或 "top-100"')
+        return v
+
+    @field_validator("timing")
+    @classmethod
+    def _v_timing(cls, v: str) -> str:
+        v = v.strip().upper()
+        if v not in ("T1", "T2", "T3", "T4", "T5"):
+            raise ValueError("timing 必须是 T1-T5")
+        return v
+
+
+# ---------------------------------------------------------------------------
+# Tool implementations (🟡 tier)
+# ---------------------------------------------------------------------------
+
+
+async def ipv6_recon(params: Ipv6ReconInput) -> str:
+    """IPv6 渗透侦察：路由发现 + NDP + MAC→SLAAC 地址猜测，一次摸清 v6 局域网。
+
+    /64 有 2^64 个地址无法全扫，主动发现靠四路技巧：
+    1. **rdisc6** — 主动 Router Solicitation，列出本网段所有 IPv6 路由器
+       及其通告的前缀 / RDNSS（DNS 服务器）/ NAT64 前缀 — RDNSS 是 v6
+       DNS 劫持攻击的核心目标
+    2. **NDP 邻居表** — 被动收集所有与本机通信过的 v6 设备
+    3. **SLAAC 猜测** — 取 IPv4 邻居表的 MAC → 推导 EUI-64 SLAAC 地址 →
+       并发 ping 验证。这是找到"v4 设备的 v6 地址"的关键（EUI-64 地址在
+       2^64 空间里按 MAC 分布，任何地址段扫描都扫不到；隐私扩展随机
+       地址无法命中）
+    4. **可选有界扫描** — 指定 /80 或更小前缀时额外跑 nmap -6 -sn
+
+    需要 root。Requires: rdisc6 (ndisc6 包)、nmap、iproute2
+    """
+    executor = get_executor(timeout=params.timeout + 60)
+    lines = ["## IPv6 渗透侦察", ""]
+
+    iface = params.interface or await detect_default_iface(executor)
+
+    # --- L1: rdisc6 active router discovery ---
+    r = await executor.run(
+        ["rdisc6", "-n", "-r", "2", "-w", "4000", iface], timeout=30
+    )
+    routers = _parse_rdisc_output(r.stdout)
+    lines.append("### 1️⃣ 路由发现（rdisc6）")
+    lines.append("")
+    if "not found" in r.stderr:
+        lines.append(
+            "⚠️ rdisc6 未安装 — `sudo apt install ndisc6`（setup.sh 已包含）"
+        )
+    elif routers:
+        for i, rt in enumerate(routers, 1):
+            head = f"**路由器 {i}: `{rt['src']}`**"
+            if rt["lla"]:
+                head += f"（链路层 {rt['lla']}）"
+            lines.append(head)
+            meta = []
+            if rt["lifetime"] is not None:
+                meta.append(
+                    f"lifetime {rt['lifetime']}s"
+                    if isinstance(rt["lifetime"], int)
+                    else "lifetime ∞"
+                )
+            if rt["mtu"]:
+                meta.append(f"MTU {rt['mtu']}")
+            flags = []
+            if rt["stateful_addr"]:
+                flags.append("managed（DHCPv6 地址）")
+            if rt["stateful_other"]:
+                flags.append("other-config（DHCPv6 其他配置）")
+            if flags:
+                meta.append("、".join(flags))
+            if meta:
+                lines.append("- " + " | ".join(meta))
+            for p in rt["prefixes"]:
+                pflags = []
+                if p["onlink"]:
+                    pflags.append("on-link")
+                if p["autoconf"]:
+                    pflags.append("自动配置（SLAAC）")
+                if not p["onlink"] and not p["autoconf"]:
+                    pflags.append("无 on-link/SLAAC（有状态分配）")
+                life = (
+                    f"valid {p['valid']}s / pref {p['pref']}s"
+                    if p["valid"] is not None
+                    else ""
+                )
+                lines.append(
+                    f"- 前缀 `{p['prefix']}/{p['plen']}` — {'、'.join(pflags)}"
+                    + (f"，{life}" if life else "")
+                )
+            for d in rt["rdns"]:
+                lines.append(
+                    f"- ⚠️ RDNSS 通告的 DNS 服务器：`{d['server']}`"
+                    "（v6 DNS 劫持攻击的核心目标）"
+                )
+            for n in rt["nat64"]:
+                lines.append(f"- NAT64 前缀：`{n['prefix']}/{n['plen']}`")
+    elif r.returncode == 2:
+        lines.append(
+            "_(未收到任何路由器通告 — 本网段可能没有 IPv6 路由器，或路由器未发 RA；"
+            "本机大概率没有 v6 默认路由，攻击类工具在此环境无从测起)_"
+        )
+    else:
+        lines.append(
+            f"⚠️ rdisc6 执行失败（exit {r.returncode}）："
+            f"{(r.stderr or r.stdout).strip()[:200]}"
+        )
+    lines.append("")
+
+    # --- passive data reused by both cross-reference and SLAAC guessing ---
+    v4_by_mac = await _v4_neigh_macs(executor)
+
+    # --- L2: NDP neighbour table (passive) ---
+    ndp = await ndp_devices(executor)
+    lines.append("### 2️⃣ NDP 邻居表（被动）")
+    lines.append("")
+    lines.append(f"共 {len(ndp)} 台与本机通信过的 v6 设备。")
+    lines.append("")
+
+    # --- L3: MAC → SLAAC EUI-64 guessing ---
+    slaac_hits: list[dict] = []
+    slaac_note = ""
+    lines.append("### 3️⃣ SLAAC 地址猜测（MAC → EUI-64）")
+    lines.append("")
+    if not params.slaac_guess:
+        slaac_note = "已关闭（slaac_guess=false）"
+    else:
+        prefixes = await _local_v6_prefixes(executor)
+        if not prefixes:
+            slaac_note = "跳过 — 本机没有 global/ULA /64 前缀（没有可推导的 SLAAC 网段）"
+        elif not v4_by_mac:
+            slaac_note = (
+                "跳过 — IPv4 邻居表为空（先 ping 一下网段，或跑 ipv6_scan 做主动 arp-scan）"
+            )
+        else:
+            cands: list[tuple[str, str, str]] = []  # (addr, mac, v4)
+            for mac, v4 in list(v4_by_mac.items())[: params.slaac_max]:
+                iid = _mac_to_eui64_iid(mac)
+                if not iid:
+                    continue
+                for pref, _if in prefixes:
+                    cands.append((_slaac_candidate(pref, iid), mac, v4))
+            if cands:
+                async def _ping_one(addr: str) -> tuple[str, bool]:
+                    pr = await executor.run(
+                        ["ping", "-6", "-c", "1", "-W", "2", addr], timeout=10
+                    )
+                    return addr, pr.success
+
+                results = await asyncio.gather(
+                    *[_ping_one(a) for a, _, _ in cands]
+                )
+                alive = {a for a, ok in results if ok}
+                for addr, mac, v4 in cands:
+                    if addr in alive:
+                        slaac_hits.append({"ip": addr, "mac": mac, "v4": v4})
+                slaac_note = (
+                    f"用 {min(len(v4_by_mac), params.slaac_max)} 个 MAC × "
+                    f"{len(prefixes)} 个前缀推导 {len(cands)} 个候选地址，"
+                    f"并发 ping 验证 → **{len(alive)} 台命中**"
+                )
+    lines.append(slaac_note or "未执行。")
+    lines.append("")
+
+    # --- L4: optional bounded nmap sweep ---
+    sweep_hosts: list[dict] = []
+    raw_parts: list[str] = []
+    if params.subnet:
+        raw_sub = params.subnet
+        zone = ""
+        bare = raw_sub
+        if "%" in raw_sub:
+            bare, zone = raw_sub.split("%", 1)
+        iface_s = zone or params.interface or await detect_default_iface(executor)
+        net = (
+            ipaddress.IPv6Network(bare, strict=False)
+            if "/" in bare
+            else ipaddress.IPv6Network(bare + "/128", strict=False)
+        )
+        if net.is_link_local and not zone:
+            zone = iface_s
+        nmap_target = bare + (f"%{zone}" if zone else "")
+        cmd = ["nmap", "-sn", "-6", "-T4", "--max-retries", "1", nmap_target]
+        lines.append("### 4️⃣ 有界扫描（nmap -6 -sn）")
+        lines.append("")
+        r2 = await executor.run(cmd, timeout=params.timeout)
+        sweep_hosts = _parse_nmap6_hosts(r2.stdout)
+        lines.append(
+            f"主动扫描 `{nmap_target}` → {len(sweep_hosts)} 台在线"
+        )
+        raw_parts.append(
+            f"#### `{' '.join(cmd)}`\n```\n{r2.stdout.strip()[:_MAX_OUTPUT]}\n```"
+        )
+        lines.append("")
+
+    # --- merge NDP + SLAAC + sweep, dedupe by address ---
+    merged: dict[str, dict] = {}
+    for d in ndp:
+        merged[d["ip"]] = {
+            "ip": d["ip"],
+            "mac": d["mac"],
+            "cls": _classify_ipv6(d["ip"]),
+            "src": "NDP 邻居表",
+            "v4": "-",
+        }
+    for h in slaac_hits:
+        if h["ip"] in merged:
+            merged[h["ip"]]["src"] += " + SLAAC 猜测"
+            if not merged[h["ip"]]["mac"]:
+                merged[h["ip"]]["mac"] = h["mac"]
+            if merged[h["ip"]]["v4"] == "-":
+                merged[h["ip"]]["v4"] = h["v4"]
+        else:
+            merged[h["ip"]] = {
+                "ip": h["ip"],
+                "mac": h["mac"],
+                "cls": _classify_ipv6(h["ip"]),
+                "src": "SLAAC 猜测",
+                "v4": h["v4"],
+            }
+    for h in sweep_hosts:
+        ip = h["ip"]
+        if ip in merged:
+            if h["mac"]:
+                merged[ip]["mac"] = h["mac"]
+            if "扫描" not in merged[ip]["src"]:
+                merged[ip]["src"] += " + 有界扫描"
+        else:
+            merged[ip] = {
+                "ip": ip,
+                "mac": h["mac"],
+                "cls": _classify_ipv6(ip),
+                "src": "有界扫描",
+                "v4": "-",
+            }
+
+    # --- v4 cross-reference ---
+    v6_only: list[dict] = []
+    for row in merged.values():
+        if not v4_by_mac or row["v4"] != "-":
+            continue
+        if row["mac"] in v4_by_mac:
+            row["v4"] = v4_by_mac[row["mac"]]
+        elif row["mac"]:
+            row["v4"] = "🔮 仅 v6 可见"
+            v6_only.append(row)
+
+    # --- output ---
+    cls_label = {
+        "global": "🌐 公网",
+        "ULA": "🏠 ULA",
+        "link-local": "🔗 链路本地",
+        "loopback": "🔄 回环",
+    }
+    lines.append("### 📋 发现汇总")
+    lines.append("")
+    rows = sorted(merged.values(), key=lambda x: (x["cls"], x["ip"]))
+    if rows:
+        lines.append("| 地址 | 类型 | MAC | IPv4 对照 | 来源 |")
+        lines.append("|------|------|-----|-----------|------|")
+        for row in rows:
+            lines.append(
+                f"| `{row['ip']}` | {cls_label.get(row['cls'], row['cls'])} "
+                f"| {row['mac'] or '-'} | {row['v4']} | {row['src']} |"
+            )
+        lines.append("")
+        lines.append(
+            f"**统计:** 共 {len(rows)} 台 | NDP {len(ndp)} | "
+            f"SLAAC 命中 {len(slaac_hits)} | 有界扫描 {len(sweep_hosts)}"
+            + (f" | 🔮 仅 IPv6 可见 {len(v6_only)}" if v6_only else "")
+        )
+    else:
+        lines.append("_(未发现任何 IPv6 设备)_")
+    lines.append("")
+    lines.append(
+        "💡 SLAAC 猜测只命中 EUI-64 永久地址；设备若用隐私扩展随机地址则无法命中。"
+        "/64 有 2^64 个地址，全扫不可行 — 确认地址后用 `ipv6_service_scan` "
+        "做端口/服务扫描。"
+    )
+    if raw_parts:
+        lines.append("")
+        lines.append("### 原始输出")
+        lines.append("")
+        lines.extend(raw_parts)
+
+    return "\n".join(lines)
+
+
+# ===================================================================
+# 12. ipv6_service_scan — 🟡 nmap -6 service scan (PENTEST_ENABLED)
+# ===================================================================
+
+
+async def ipv6_service_scan(params: Ipv6ServiceScanInput) -> str:
+    """IPv6 服务扫描：nmap -6 -sV -sC 探测 v6 目标的开放端口/服务版本/NSE 脚本。
+
+    target 可以是单个 IPv6 地址，或 /80 或更小的前缀（/64 有 2^64 个地址，
+    全扫不可行；大前缀 -sV 会很慢，建议 /116 或更小）。先用 ipv6_recon
+    发现目标地址。
+
+    Requires: nmap（Kali 预装）
+    """
+    executor = get_executor(timeout=params.timeout + 60)
+    raw = params.target
+    zone = ""
+    bare = raw
+    if "%" in raw:
+        bare, zone = raw.split("%", 1)
+    has_cidr = "/" in bare
+    try:
+        net = (
+            ipaddress.IPv6Network(bare, strict=False) if has_cidr else None
+        )
+    except ValueError:
+        net = None
+    if has_cidr:
+        is_ll = net.is_link_local if net is not None else False
+    else:
+        is_ll = ipaddress.IPv6Address(bare).is_link_local
+    if is_ll and not zone:
+        zone = await detect_default_iface(executor)
+    target = bare + (f"%{zone}" if zone else "")
+
+    cmd = ["nmap", "-6"]
+    if params.service_version:
+        cmd.append("-sV")
+    if params.scripts:
+        cmd.append("-sC")
+    cmd += ["-" + params.timing, "--max-retries", "1"]
+    if params.ports:
+        cmd += ["-p", params.ports]
+    cmd.append(target)
+
+    lines = [
+        "## IPv6 服务扫描",
+        "",
+        f"目标: `{target}`  |  命令: `{' '.join(cmd)}`",
+        "",
+    ]
+    if has_cidr and net is not None and net.prefixlen < 116:
+        lines.append(
+            f"⚠️ /{net.prefixlen} 前缀较大 — -sV 扫描很慢，可能被超时截断；"
+            "建议 /116 或更小，或先缩小到单个地址"
+        )
+        lines.append("")
+
+    r = await executor.run(cmd, timeout=params.timeout)
+    hosts = _parse_nmap6_service(r.stdout)
+
+    for h in hosts:
+        head = f"### `{h['host']}`"
+        if h["up"] is False:
+            head += "（似乎离线）"
+        lines.append(head)
+        if h["not_shown"]:
+            lines.append(f"_{h['not_shown']}_")
+        open_ports = [p for p in h["ports"] if p["state"] == "open"]
+        if h["ports"]:
+            lines.append("")
+            lines.append("| 端口 | 状态 | 服务 | 版本/信息 |")
+            lines.append("|------|------|------|-----------|")
+            for p in h["ports"]:
+                lines.append(
+                    f"| {p['port']}/{p['proto']} | {p['state']} "
+                    f"| {p['service']} | {p['version'] or '-'} |"
+                )
+            for p in h["ports"]:
+                if p["scripts"]:
+                    lines.append("")
+                    lines.append(
+                        f"**端口 {p['port']}/{p['proto']} 脚本输出:**"
+                    )
+                    lines.append("")
+                    for s in p["scripts"]:
+                        lines.append(f"- {s}")
+        else:
+            lines.append("")
+            lines.append("_(未发现开放端口)_")
+        if h["mac"]:
+            lines.append(f"\nMAC: {h['mac']}")
+        for si in h["service_info"]:
+            lines.append(f"Service Info: {si}")
+        lines.append("")
+
+    if not hosts:
+        lines.append("_(无扫描结果 — 检查目标地址是否正确、是否在线)_")
+        if r.stderr:
+            lines.append("")
+            lines.append(f"⚠️ nmap 输出: {r.stderr.strip()[:500]}")
+        lines.append("")
+    else:
+        stats = ", ".join(
+            f"{h['host']}: {sum(1 for p in h['ports'] if p['state'] == 'open')} 个开放端口"
+            for h in hosts
+        )
+        lines.append(f"**统计:** {len(hosts)} 台主机 — {stats}")
+        lines.append("")
+        lines.append(
+            "💡 快速查端口可关 -sV/-sC（service_version=false, scripts=false）"
+        )
+        lines.append("")
+        lines.append("### 原始输出")
+        lines.append("")
+        lines.append(f"```\n{r.stdout.strip()[:_MAX_OUTPUT]}\n```")
+
+    return "\n".join(lines)
+
+
+# ===================================================================
 # Registry
 # ===================================================================
 
@@ -1562,4 +2430,10 @@ IPV6_TOOLS: dict[str, tuple[callable, type[BaseModel] | None]] = {
     "ipv6_doctor": (ipv6_doctor, Ipv6DoctorInput),
     "ipv6_ra_inspect": (ipv6_ra_inspect, Ipv6RaInspectInput),
     "ipv6_route_debug": (ipv6_route_debug, Ipv6RouteDebugInput),
+}
+
+# 🟡 Active IPv6 recon — gated by PENTEST_ENABLED (registered in server.py).
+IPV6_PENTEST_TOOLS: dict[str, tuple[callable, type[BaseModel] | None]] = {
+    "ipv6_recon": (ipv6_recon, Ipv6ReconInput),
+    "ipv6_service_scan": (ipv6_service_scan, Ipv6ServiceScanInput),
 }

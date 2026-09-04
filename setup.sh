@@ -129,6 +129,7 @@ PENTEST_PKGS=(
     seclists
     exploitdb
     apache2-utils   # ab — http_load_test
+    ndisc6          # rdisc6 — ipv6_recon 路由发现
 )
 
 # Auto-download nuclei templates (not in apt)

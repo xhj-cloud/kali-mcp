@@ -171,6 +171,17 @@ if _pentest_enabled:
             logger.info("Registered vulnscan tool: %s", _name)
 
         logger.info("Vulnscan tools: %d registered", len(VULNSCAN_TOOLS))
+
+        # IPv6 active recon tools (same guard as pentest)
+        from kali_mcp.ipv6 import IPV6_PENTEST_TOOLS
+
+        for _name, (_func, _model) in IPV6_PENTEST_TOOLS.items():
+            _register_tool_with_model(_name, _func, _model)
+            logger.info("Registered ipv6 pentest tool: %s", _name)
+
+        logger.info(
+            "IPv6 pentest tools: %d registered", len(IPV6_PENTEST_TOOLS)
+        )
     except ImportError as e:
         logger.warning("Pentest module import failed: %s", e)
 else:

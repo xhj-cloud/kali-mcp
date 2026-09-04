@@ -7,24 +7,36 @@ from pydantic import ValidationError
 
 from kali_mcp.executor import CommandResult
 from kali_mcp.ipv6 import (
+    IPV6_PENTEST_TOOLS,
     IPV6_TOOLS,
     Ipv6DigInput,
     Ipv6DoctorInput,
     Ipv6PingInput,
     Ipv6RaInspectInput,
     Ipv6RouteDebugInput,
+    Ipv6ReconInput,
     Ipv6ScanInput,
+    Ipv6ServiceScanInput,
     Ipv6TracerouteInput,
     _analyze_addr_config,
     _classify_ipv6,
     _count_nft_rules,
     _extract_v6_tables,
     _is_valid_ipv6,
+    _local_v6_prefixes,
+    _mac_to_eui64_iid,
     _own_v6_sweep_prefixes,
     _parse_dig_answers,
     _parse_nmap6_hosts,
+    _parse_nmap6_service,
     _parse_ra_output,
+    _parse_rdisc_output,
     _parse_route_get,
+    _slaac_candidate,
+    _validate_v6_subnet,
+    _v4_neigh_macs,
+    ipv6_recon,
+    ipv6_service_scan,
 )
 
 
@@ -630,3 +642,497 @@ class TestRaInspectCommand:
         assert exec_timeout == 30  # backstop = duration + 10
         # graceful-stop path: no RAs parsed, rc 124 must not error out
         assert "0 个 RA" in out
+
+
+# ---------------------------------------------------------------------------
+# 🟡 ipv6_recon / ipv6_service_scan — pentest tier
+# ---------------------------------------------------------------------------
+
+
+class TestValidateV6Subnet:
+    def test_none_passes_through(self):
+        assert _validate_v6_subnet(None) is None
+        assert _validate_v6_subnet("") is None
+        assert _validate_v6_subnet("   ") is None
+
+    def test_accepts_small_prefix(self):
+        assert _validate_v6_subnet("fd00:beef::/80") == "fd00:beef::/80"
+
+    def test_accepts_single_address(self):
+        assert _validate_v6_subnet("2408:4000:1::1") == "2408:4000:1::1"
+
+    def test_rejects_64(self):
+        with pytest.raises(ValidationError):
+            Ipv6ReconInput(subnet="2408:4000:1::/64")
+
+    def test_rejects_garbage(self):
+        with pytest.raises(ValidationError):
+            Ipv6ReconInput(subnet="not-an-ip")
+
+    def test_rejects_shell_meta(self):
+        with pytest.raises(ValidationError):
+            Ipv6ReconInput(subnet="2408:4000:1::1; rm -rf /")
+
+
+class TestMacToEui64:
+    def test_flips_ul_bit_and_inserts_fffe(self):
+        assert _mac_to_eui64_iid("00:1a:2b:3c:4d:5e") == "011a:2bff:fe3c:4d5e"
+
+    def test_another_mac(self):
+        assert _mac_to_eui64_iid("d4:e8:53:66:65:6f") == "d5e8:53ff:fe66:656f"
+
+    def test_already_local_bit(self):
+        # u/l bit (0x01) already set → flipping clears it
+        assert _mac_to_eui64_iid("01:1a:2b:3c:4d:5e") == "001a:2bff:fe3c:4d5e"
+
+    @pytest.mark.parametrize("bad", ["zz:1a:2b:3c:4d:5e", "00:1a:2b", "", "001a:2b:3c:4d:5e"])
+    def test_malformed(self, bad):
+        assert _mac_to_eui64_iid(bad) is None
+
+
+class TestSlaacCandidate:
+    def test_global_prefix(self):
+        assert (
+            _slaac_candidate("2001:db8::/64", "011a:2bff:fe3c:4d5e")
+            == "2001:db8::11a:2bff:fe3c:4d5e"
+        )
+
+    def test_ula_prefix(self):
+        assert (
+            _slaac_candidate("fd12:3456::/64", "011a:2bff:fe3c:4d5e")
+            == "fd12:3456::11a:2bff:fe3c:4d5e"
+        )
+
+    def test_non_zero_network(self):
+        assert (
+            _slaac_candidate("2408:abcd:1234:5::/64", "011a:2bff:fe3c:4d5e")
+            == "2408:abcd:1234:5:11a:2bff:fe3c:4d5e"
+        )
+
+
+SAMPLE_RDISC = """Soliciting ff02::2 (ff02::2) on eth0...
+Router advertisement received from fe80::1 with hop limit 64:
+Hop limit                 :       64
+Stateful address conf.    :          valid
+Stateful other conf.      :          invalid
+Mobile home agent         :          invalid
+Router preference         :       medium
+Neighbor discovery proxy  :          invalid
+Router lifetime           :      1800 (0x00000708) seconds
+Reachable time            : unspecified (0x00000000)
+Retransmit time           : unspecified (0x00000000)
+ Source link-layer address: AA:BB:CC:DD:EE:FF
+ Prefix                   :  2408:abcd:1234::/64
+  On-link                 :          valid
+  Autonomous address conf.:          valid
+  Valid time              :    300000 (0x000493e0) seconds
+  Pref. time              :    300000 (0x000493e0) seconds
+ MTU                      :      1500 bytes (0x05dc)
+ Prefix                   :  2408:abcd:1235::/64
+  On-link                 :          invalid
+  Autonomous address conf.:          invalid
+  Valid time              :    300000 (0x000493e0) seconds
+  Pref. time              :    300000 (0x000493e0) seconds
+ Route                    : 2408:abcd:99::/64
+  Route preference        :       high
+  Route lifetime          :      1800 (0x00000708) seconds
+ Recursive DNS server     : 2400:3200::1
+  DNS server lifetime     :      1800 (0x00000708) seconds
+ DNS search list          : example.com
+  DNS search list lifetime:      1800 (0x00000708) seconds
+ NAT64 prefix             : 64:ff9b::/96
+  NAT64 prefix lifetime   :      1800 (0x00000708) seconds
+"""
+
+
+class TestParseRdiscOutput:
+    def test_parses_full_ra(self):
+        routers = _parse_rdisc_output(SAMPLE_RDISC)
+        assert len(routers) == 1
+        rt = routers[0]
+        assert rt["src"] == "fe80::1"
+        assert rt["hop_limit"] == 64
+        assert rt["stateful_addr"] is True
+        assert rt["stateful_other"] is False
+        assert rt["mha"] is False
+        assert rt["proxy"] is False
+        assert rt["pref"] == "medium"
+        assert rt["lifetime"] == 1800
+        assert rt["reachable"] is None  # unspecified (0x00000000)
+        assert rt["lla"] == "AA:BB:CC:DD:EE:FF"
+        assert rt["mtu"] == 1500
+
+    def test_prefixes(self):
+        rt = _parse_rdisc_output(SAMPLE_RDISC)[0]
+        assert len(rt["prefixes"]) == 2
+        p0 = rt["prefixes"][0]
+        assert p0["prefix"] == "2408:abcd:1234::"
+        assert p0["plen"] == 64
+        assert p0["onlink"] is True
+        assert p0["autoconf"] is True
+        assert p0["valid"] == 300000
+        assert p0["pref"] == 300000
+        p1 = rt["prefixes"][1]
+        assert p1["prefix"] == "2408:abcd:1235::"
+        assert p1["onlink"] is False
+        assert p1["autoconf"] is False
+
+    def test_routes_rdns_nat64(self):
+        rt = _parse_rdisc_output(SAMPLE_RDISC)[0]
+        assert rt["routes"][0]["prefix"] == "2408:abcd:99::"
+        assert rt["routes"][0]["plen"] == 64
+        assert rt["routes"][0]["pref"] == "high"
+        assert rt["routes"][0]["lifetime"] == 1800
+        assert rt["rdns"][0]["server"] == "2400:3200::1"
+        assert rt["rdns"][0]["lifetime"] == 1800
+        assert rt["search_lists"][0]["list"] == "example.com"
+        assert rt["nat64"][0]["prefix"] == "64:ff9b::"
+        assert rt["nat64"][0]["plen"] == 96
+
+    def test_no_response(self):
+        out = "Soliciting ff02::2 (ff02::2) on eth0...\nTimed out.\nTimed out.\nNo response."
+        assert _parse_rdisc_output(out) == []
+
+    def test_empty(self):
+        assert _parse_rdisc_output("") == []
+
+    def test_two_routers(self):
+        out = (
+            "Router advertisement received from fe80::1 with hop limit 64:\n"
+            "Hop limit                 :       64\n"
+            " Prefix                   :  2001:db8::/64\n"
+            "  On-link                 :          valid\n"
+            "Router advertisement received from fe80::2 with hop limit 64:\n"
+            "Hop limit                 :       255\n"
+        )
+        routers = _parse_rdisc_output(out)
+        assert [r["src"] for r in routers] == ["fe80::1", "fe80::2"]
+        assert routers[0]["prefixes"][0]["prefix"] == "2001:db8::"
+        assert routers[1]["prefixes"] == []
+
+    def test_fallback_header(self):
+        # Unrecognised header shape, ending in a v6 address
+        out = "Got RA from fe80::254\nHop limit                 :       64\n"
+        routers = _parse_rdisc_output(out)
+        assert len(routers) == 1
+        assert routers[0]["src"] == "fe80::254"
+        assert routers[0]["hop_limit"] == 64
+
+
+SAMPLE_NMAP6_SVC = """Starting Nmap 7.92 ( https://nmap.org ) at 2025-01-01 00:00 UTC
+Nmap scan report for 2408:4000:1::1
+Host is up (0.0045s latency).
+MAC Address: AA:BB:CC:DD:EE:FF (Intel Corporate)
+Not shown: 997 closed tcp ports
+PORT     STATE  SERVICE     VERSION
+22/tcp   open   ssh         OpenSSH 8.9p1 (protocol 2.9)
+| ssh-host-key:
+|_  256 aa:bb:cc:dd (ECDSA)
+80/tcp   open   http        Apache httpd 2.4.52
+|_http-title: Site doesn't have a page (text/html)
+8080/tcp filtered http-proxy
+Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
+"""
+
+
+class TestParseNmap6Service:
+    def test_full_parse(self):
+        hosts = _parse_nmap6_service(SAMPLE_NMAP6_SVC)
+        assert len(hosts) == 1
+        h = hosts[0]
+        assert h["host"] == "2408:4000:1::1"
+        assert h["up"] is True
+        assert h["not_shown"] == "997 closed tcp ports"
+        assert h["mac"] == "AA:BB:CC:DD:EE:FF"
+        assert len(h["ports"]) == 3
+        p22, p80, p8080 = h["ports"]
+        assert p22 == {
+            "port": "22", "proto": "tcp", "state": "open",
+            "service": "ssh", "version": "OpenSSH 8.9p1 (protocol 2.9)",
+            "scripts": ["ssh-host-key:", "256 aa:bb:cc:dd (ECDSA)"],
+        }
+        assert p80["port"] == "80"
+        assert p80["version"] == "Apache httpd 2.4.52"
+        assert p80["scripts"] == ["http-title: Site doesn't have a page (text/html)"]
+        assert p8080["state"] == "filtered"
+        assert p8080["service"] == "http-proxy"
+        assert p8080["version"] == ""
+        assert h["service_info"][0].startswith("OS: Linux")
+
+    def test_no_hosts(self):
+        assert _parse_nmap6_service("Nmap done: 0 IP addresses (0 hosts up) scanned in 1.2 seconds\n") == []
+
+    def test_two_hosts(self):
+        out = (
+            "Nmap scan report for 2408::1\n"
+            "Host is up (0.001s latency).\n"
+            "22/tcp   open   ssh\n"
+            "Nmap scan report for 2408::2\n"
+            "Host does not appear to be up.\n"
+        )
+        hosts = _parse_nmap6_service(out)
+        assert [h["host"] for h in hosts] == ["2408::1", "2408::2"]
+        assert hosts[0]["up"] is True
+        assert hosts[1]["up"] is False
+
+
+SAMPLE_V4_NEIGH = """192.168.0.5 dev eth0 lladdr d4:e8:53:66:65:6f STALE
+192.168.0.21 dev eth0 lladdr 6c:f1:7e:e5:47:b9 REACHABLE
+"""
+
+SAMPLE_V6_NEIGH = """2408:abcd:1234::99 dev eth0 lladdr aa:bb:cc:dd:ee:01 REACHABLE
+fe80::1 dev eth0 lladdr aa:bb:cc:dd:ee:ff STALE
+"""
+
+
+class _CmdEx:
+    """Fake executor keyed on substrings of the joined command."""
+
+    def __init__(self, mapping):
+        self.mapping = mapping  # list of (substring, CommandResult)
+        self.calls: list[list[str]] = []
+
+    async def run(self, cmd, timeout=None, input_data=None):
+        self.calls.append(list(cmd))
+        joined = " ".join(cmd)
+        for key, res in self.mapping:
+            if key in joined:
+                return res
+        return CommandResult(stdout="", stderr="", returncode=0, success=True)
+
+
+def _cr(stdout="", stderr="", rc=0):
+    return CommandResult(
+        stdout=stdout, stderr=stderr, returncode=rc, success=(rc == 0)
+    )
+
+
+# str(IPv6Address) does not compress a single zero group, so the 4th group
+# stays "0" (not "::") when the prefix is 2408:abcd:1234::/64.
+CAND_HIT = "2408:abcd:1234:0:d5e8:53ff:fe66:656f"
+CAND_MISS = "2408:abcd:1234:0:6df1:7eff:fee5:47b9"
+
+
+class TestLocalV6Prefixes:
+    def test_finds_global_64(self):
+        ex = _Ex({"addr": SAMPLE_IP6_ADDR})
+        assert _run(_local_v6_prefixes(ex)) == [("2408:abcd:1234::/64", "eth0")]
+
+    def test_failed_command_empty(self):
+        assert _run(_local_v6_prefixes(_Ex(success=False))) == []
+
+
+class TestV4NeighMacs:
+    def test_parses(self):
+        ex = _CmdEx([("ip neigh", _cr(SAMPLE_V4_NEIGH))])
+        assert _run(_v4_neigh_macs(ex)) == {
+            "D4:E8:53:66:65:6F": "192.168.0.5",
+            "6C:F1:7E:E5:47:B9": "192.168.0.21",
+        }
+
+
+class TestIpv6ReconTool:
+    def test_full_run_with_hit(self, monkeypatch):
+        import kali_mcp.ipv6 as v6
+
+        ex = _CmdEx(
+            [
+                ("rdisc6", _cr(SAMPLE_RDISC)),
+                ("ip -6 addr", _cr(SAMPLE_IP6_ADDR)),
+                ("ip -6 neigh", _cr(SAMPLE_V6_NEIGH)),
+                ("ip neigh", _cr(SAMPLE_V4_NEIGH)),
+                (CAND_HIT, _cr("1 packets transmitted, 1 received", rc=0)),
+                (CAND_MISS, _cr("1 packets transmitted, 0 received", rc=1)),
+            ]
+        )
+        monkeypatch.setattr(v6, "get_executor", lambda timeout=None: ex)
+        out = _run(ipv6_recon(Ipv6ReconInput()))
+
+        assert "路由发现（rdisc6）" in out
+        assert "`fe80::1`" in out
+        assert "前缀 `2408:abcd:1234::/64`" in out
+        assert "RDNSS" in out and "2400:3200::1" in out
+        assert "SLAAC 命中 1" in out
+        assert f"`{CAND_HIT}`" in out
+        assert "SLAAC 猜测" in out
+        # NDP rows present
+        assert "2408:abcd:1234::99" in out
+        # v4 cross-reference for the SLAAC hit
+        assert "192.168.0.5" in out
+        # both candidate pings were issued
+        assert any(CAND_HIT in " ".join(c) for c in ex.calls)
+        assert any(CAND_MISS in " ".join(c) for c in ex.calls)
+
+    def test_rdisc6_no_response(self, monkeypatch):
+        import kali_mcp.ipv6 as v6
+
+        ex = _CmdEx(
+            [
+                (
+                    "rdisc6",
+                    _cr(
+                        "Soliciting ff02::2 (ff02::2) on eth0...\nTimed out.\nNo response.",
+                        rc=2,
+                    ),
+                ),
+                ("ip -6 addr", _cr(SAMPLE_IP6_ADDR)),
+                ("ip -6 neigh", _cr(SAMPLE_V6_NEIGH)),
+                ("ip neigh", _cr(SAMPLE_V4_NEIGH)),
+            ]
+        )
+        monkeypatch.setattr(v6, "get_executor", lambda timeout=None: ex)
+        out = _run(ipv6_recon(Ipv6ReconInput(slaac_guess=False)))
+        assert "未收到任何路由器通告" in out
+        assert "已关闭（slaac_guess=false）" in out
+
+    def test_rdisc6_missing(self, monkeypatch):
+        import kali_mcp.ipv6 as v6
+
+        ex = _CmdEx(
+            [
+                (
+                    "rdisc6",
+                    _cr(
+                        stderr="Tool 'rdisc6' not found. Install it with: sudo apt install rdisc6",
+                        rc=-1,
+                    ),
+                ),
+                ("ip -6 addr", _cr("")),
+                ("ip -6 neigh", _cr("")),
+                ("ip neigh", _cr("")),
+            ]
+        )
+        monkeypatch.setattr(v6, "get_executor", lambda timeout=None: ex)
+        out = _run(ipv6_recon(Ipv6ReconInput()))
+        assert "rdisc6 未安装" in out
+        assert "ndisc6" in out
+
+    def test_with_bounded_sweep(self, monkeypatch):
+        import kali_mcp.ipv6 as v6
+
+        nmap_out = (
+            "Nmap scan report for 2408:abcd:1234::5\n"
+            "Host is up (0.001s latency).\n"
+        )
+        ex = _CmdEx(
+            [
+                ("rdisc6", _cr(SAMPLE_RDISC)),
+                ("ip -6 addr", _cr(SAMPLE_IP6_ADDR)),
+                ("ip -6 neigh", _cr("")),
+                ("ip neigh", _cr("")),
+                ("nmap -sn", _cr(nmap_out)),
+            ]
+        )
+        monkeypatch.setattr(v6, "get_executor", lambda timeout=None: ex)
+        out = _run(
+            ipv6_recon(Ipv6ReconInput(subnet="2408:abcd:1234::/96", slaac_guess=False))
+        )
+        assert "有界扫描" in out
+        assert "2408:abcd:1234::5" in out
+        assert any(c[0] == "nmap" for c in ex.calls)
+
+
+class TestIpv6ServiceScanInput:
+    def test_accepts_address(self):
+        assert Ipv6ServiceScanInput(target="2408:4000:1::1").target == "2408:4000:1::1"
+
+    def test_accepts_small_cidr(self):
+        assert Ipv6ServiceScanInput(target="2408:4000:1::/90").target == "2408:4000:1::/90"
+
+    def test_rejects_64(self):
+        with pytest.raises(ValidationError):
+            Ipv6ServiceScanInput(target="2408:4000:1::/64")
+
+    def test_rejects_shell_meta(self):
+        with pytest.raises(ValidationError):
+            Ipv6ServiceScanInput(target="2408:4000:1::1; id")
+
+    @pytest.mark.parametrize("ports", ["80,443", "1-1024", "top-100", "80", "53,80,443"])
+    def test_accepts_ports(self, ports):
+        assert Ipv6ServiceScanInput(target="2408::1", ports=ports).ports == ports
+
+    @pytest.mark.parametrize("ports", ["80;rm", "top", "-6", "80 443", "80,44;3"])
+    def test_rejects_ports(self, ports):
+        with pytest.raises(ValidationError):
+            Ipv6ServiceScanInput(target="2408::1", ports=ports)
+
+    def test_timing_normalized(self):
+        assert Ipv6ServiceScanInput(target="2408::1", timing="t3").timing == "T3"
+
+    def test_rejects_bad_timing(self):
+        with pytest.raises(ValidationError):
+            Ipv6ServiceScanInput(target="2408::1", timing="X1")
+
+
+class TestIpv6ServiceScanTool:
+    def test_full_run(self, monkeypatch):
+        import kali_mcp.ipv6 as v6
+
+        ex = _CmdEx([("nmap", _cr(SAMPLE_NMAP6_SVC))])
+        monkeypatch.setattr(v6, "get_executor", lambda timeout=None: ex)
+        out = _run(ipv6_service_scan(Ipv6ServiceScanInput(target="2408:4000:1::1")))
+
+        cmd = ex.calls[0]
+        assert cmd[0] == "nmap"
+        assert "-6" in cmd and "-sV" in cmd and "-sC" in cmd and "-T4" in cmd
+        assert cmd[-1] == "2408:4000:1::1"
+
+        assert "| 22/tcp | open | ssh | OpenSSH 8.9p1 (protocol 2.9) |" in out
+        assert "| 80/tcp | open | http | Apache httpd 2.4.52 |" in out
+        assert "| 8080/tcp | filtered | http-proxy | - |" in out
+        assert "256 aa:bb:cc:dd (ECDSA)" in out
+        assert "MAC: AA:BB:CC:DD:EE:FF" in out
+        assert "2 个开放端口" in out
+
+    def test_link_local_gets_zone(self, monkeypatch):
+        import kali_mcp.ipv6 as v6
+
+        class _ZoneEx(_CmdEx):
+            async def run(self, cmd, timeout=None, input_data=None):
+                self.calls.append(list(cmd))
+                if "nmap" in " ".join(cmd):
+                    return _cr(SAMPLE_NMAP6_SVC)
+                if "ip route" in " ".join(cmd):
+                    return _cr("default via 192.168.0.1 dev eth0 proto static \n")
+                return _cr()
+
+        ex = _ZoneEx([])
+        monkeypatch.setattr(v6, "get_executor", lambda timeout=None: ex)
+        _run(ipv6_service_scan(Ipv6ServiceScanInput(target="fe80::1")))
+        assert ex.calls[-1][-1] == "fe80::1%eth0"
+
+    def test_no_hosts_shows_stderr(self, monkeypatch):
+        import kali_mcp.ipv6 as v6
+
+        ex = _CmdEx(
+            [("nmap", _cr(stderr="Warning: No open ports found", rc=0))]
+        )
+        monkeypatch.setattr(v6, "get_executor", lambda timeout=None: ex)
+        out = _run(ipv6_service_scan(Ipv6ServiceScanInput(target="2408::99")))
+        assert "无扫描结果" in out
+        assert "No open ports found" in out
+
+    def test_large_prefix_warning(self, monkeypatch):
+        import kali_mcp.ipv6 as v6
+
+        ex = _CmdEx([("nmap", _cr(SAMPLE_NMAP6_SVC))])
+        monkeypatch.setattr(v6, "get_executor", lambda timeout=None: ex)
+        out = _run(
+            ipv6_service_scan(Ipv6ServiceScanInput(target="2408:4000:1::/80"))
+        )
+        assert "前缀较大" in out
+
+
+class TestIpv6PentestRegistry:
+    def test_two_tools(self):
+        assert len(IPV6_PENTEST_TOOLS) == 2
+
+    def test_expected_names(self):
+        assert set(IPV6_PENTEST_TOOLS) == {"ipv6_recon", "ipv6_service_scan"}
+
+    def test_models_match(self):
+        assert IPV6_PENTEST_TOOLS["ipv6_recon"][1] is Ipv6ReconInput
+        assert IPV6_PENTEST_TOOLS["ipv6_service_scan"][1] is Ipv6ServiceScanInput
+
+    def test_base_registry_unchanged(self):
+        assert len(IPV6_TOOLS) == 10
