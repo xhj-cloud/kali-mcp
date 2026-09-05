@@ -173,7 +173,10 @@ def _parse_nmap6_hosts(output: str) -> list[dict]:
 
 
 _RA_HDR_RE = re.compile(
-    r"^\S+\s+IP6 \(hlim \d+, next-header ICMPv6 \(\d+\), payload length \d+\)\s+"
+    # flow label 非零时 tcpdump 会输出 "flowlabel 0x..."（如运营商 CPE 的 RA），
+    # 必须可选，否则真实 RA 头匹配失败、整个报文被丢弃
+    r"^\S+\s+IP6 \((?:flowlabel 0x[0-9A-Fa-f]+,\s*)?hlim \d+, "
+    r"next-header ICMPv6 \(\d+\), payload length \d+\)\s+"
     r"(\S+)\s+>\s+(\S+):\s*(?:\[[^\]]*\]\s*)?ICMP6, router advertisement, length \d+"
 )
 _RA_DETAIL_RE = re.compile(
@@ -184,6 +187,9 @@ _RA_PREFIX_RE = re.compile(
     r"Flags \[([^\]]*)\],\s*valid time (\d+)s,\s*pref\. time (\d+)s"
 )
 _RA_MTU_RE = re.compile(r"mtu option \(5\), length \d+ \(\d+\):\s*(\d+)")
+_RA_RDNSS_RE = re.compile(
+    r"rdnss option \(25\), length \d+ \(\d+\):\s*lifetime \d+s,\s*addr: (\S+)"
+)
 _RA_LLA_RE = re.compile(
     r"source link-address option \(1\), length \d+ \(\d+\):\s*"
     r"([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})"
@@ -212,6 +218,7 @@ def _parse_ra_output(output: str) -> list[dict]:
                 "prefixes": [],
                 "mtu": None,
                 "lla": None,
+                "rdns": [],
             }
             continue
         if cur is None or line.lstrip().startswith("0x"):
@@ -240,6 +247,10 @@ def _parse_ra_output(output: str) -> list[dict]:
         m = _RA_LLA_RE.search(line)
         if m:
             cur["lla"] = m.group(1).upper()
+            continue
+        m = _RA_RDNSS_RE.search(line)
+        if m:
+            cur["rdns"].append(m.group(1))
     if cur is not None:
         ras.append(cur)
     return ras
@@ -1395,9 +1406,16 @@ async def ipv6_ra_inspect(params: Ipv6RaInspectInput) -> str:
     # SIGINT makes tcpdump flush + exit cleanly. Without it the executor's
     # backstop kill at duration+10 used to discard every captured RA.
     # `-l` line-buffers output so nothing is lost even if the kill does fire.
+    #
+    # RA 的 ICMPv6 type 标准值是 129。但本部署的 Kali（aarch64 VM）存在一个
+    # 抓包层异常：ICMPv6 type 字节被捕获为「真实值 +5」（经独立 pcap 解析证实：
+    # RS 128→133、RA 129→134、NS 130→135，其余 RA 字段与 tcpdump 解码完全一致）。
+    # 因此在正常机器上 RA=129、在本机器上 RA 表现为 134。同时匹配两者以保证可移植：
+    #   - 正常机器：129 命中真实 RA；134（Time Exceeded）会被解析器忽略，无害。
+    #   - 本机器：  134 命中被偏移捕获的 RA；129 不对应任何真实类型，无害。
     cmd = ["timeout", "-s", "INT", str(params.duration),
            "tcpdump", "-i", iface, "-n", "-l", "-c", str(params.max_packets), "-vv",
-           "icmp6[0] == 134"]
+           "icmp6[0] == 129 or icmp6[0] == 134"]
     executor = get_executor(timeout=params.duration + 10)
     result = await executor.run(cmd, timeout=params.duration + 10)
 
@@ -1418,8 +1436,13 @@ async def ipv6_ra_inspect(params: Ipv6RaInspectInput) -> str:
             f"（最长 300s）再监听一次"
         )
         lines.append(
-            "- 长监听仍为空：**路由器没有在该网段发送 RA** — 这是设备拿不到 IPv6 地址"
-            "（SLAAC/DHCPv6 都依赖 RA 触发）的根本原因"
+            "- 长监听仍为空：**路由器没有周期性发送 RA** — 这是设备拿不到 IPv6 地址"
+            "（SLAAC/DHCPv6 都依赖 RA 触发）的可能原因"
+        )
+        lines.append(
+            "- ⚠️ **部分运营商 CPE（如中国移动 ah-ipv6 网关）只响应主动 Router "
+            "Solicitation（RS），不发周期 RA** — 被动监听永远抓不到，但设备仍能"
+            "通过 RS 拿到地址。此时用 `ipv6_recon`（主动发 RS）验证路由器是否可达"
         )
         lines.append(
             "- 建议: 在路由器上启用 IPv6/RA，或先用 `ipv6_status` 确认 "
@@ -1443,6 +1466,11 @@ async def ipv6_ra_inspect(params: Ipv6RaInspectInput) -> str:
         lines.append(f"- **RA 标志:** `{first['flags']}`")
         if first["mtu"]:
             lines.append(f"- **MTU:** {first['mtu']}")
+        if first.get("rdns"):
+            lines.append(
+                "- **RDNSS (RA 通告的 v6 DNS):** "
+                + "、".join(f"`{a}`" for a in first["rdns"])
+            )
         if first["prefixes"]:
             lines.append("- **通告前缀 (SLAAC):**")
             for p in first["prefixes"]:

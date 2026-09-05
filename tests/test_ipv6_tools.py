@@ -458,6 +458,60 @@ class TestParseRaOutput:
         assert _parse_ra_output(out) == []
 
 
+# 真实抓包（中国移动 ah-ipv6 CPE）：flow label 非零 → tcpdump 头带
+# "flowlabel 0x..."，且含 RDNSS 选项。旧 _RA_HDR_RE 不认 flowlabel，
+# 导致真实 RA 整包被丢弃（ra_inspect 永远报 0 个 RA）。
+SAMPLE_RA_REAL_TCPDUMP = (
+    "19:26:35.494394 IP6 (flowlabel 0x6f768, hlim 255, next-header ICMPv6 (58), "
+    "payload length 88) fe80::905b:f4ff:fe9a:f655 > fe80::250:56ff:fe27:ce21: "
+    "[icmp6 sum ok] ICMP6, router advertisement, length 88\n"
+    "\thop limit 254, Flags [none], pref high, router lifetime 7200s, "
+    "reachable time 0ms, retrans timer 0ms\n"
+    "\t  source link-address option (1), length 8 (1): 92:5b:f4:9a:f6:55\n"
+    "\t    0x0000:  925b f49a f655\n"
+    "\t  mtu option (5), length 8 (1):  1500\n"
+    "\t    0x0000:  0000 0000 05dc\n"
+    "\t  prefix info option (3), length 32 (4): 2409:8931:1259:9be::/64, "
+    "Flags [onlink, auto], valid time 7200s, pref. time 7200s\n"
+    "\t    0x0000:  40c0 0000 1c20 0000 1c20 0000 0000 2409\n"
+    "\t    0x0010:  8931 1259 09be 0000 0000 0000 0000\n"
+    "\t  rdnss option (25), length 24 (3):  lifetime 7200s, "
+    "addr: 2409:8931:1259:9be::8e\n"
+    "\t    0x0000:  0000 0000 1c20 2409 8931 1259 09be 0000\n"
+    "\t    0x0010:  0000 0000 008e\n"
+)
+
+
+class TestParseRaRealFormat:
+    def test_flowlabel_header_parsed(self):
+        ras = _parse_ra_output(SAMPLE_RA_REAL_TCPDUMP)
+        assert len(ras) == 1
+        ra = ras[0]
+        assert ra["src"] == "fe80::905b:f4ff:fe9a:f655"
+        assert ra["dst"] == "fe80::250:56ff:fe27:ce21"
+        assert ra["hop_limit"] == 254
+        assert ra["router_lifetime"] == 7200
+        assert ra["mtu"] == 1500
+        assert ra["lla"] == "92:5B:F4:9A:F6:55"
+        assert ra["prefixes"] == [
+            {
+                "prefix": "2409:8931:1259:9be::/64",
+                "flags": "onlink, auto",
+                "valid": 7200,
+                "preferred": 7200,
+            }
+        ]
+
+    def test_rdnss_parsed(self):
+        ra = _parse_ra_output(SAMPLE_RA_REAL_TCPDUMP)[0]
+        assert ra["rdns"] == ["2409:8931:1259:9be::8e"]
+
+    def test_no_flowlabel_still_parsed(self):
+        # 兼容旧格式（无 flowlabel）
+        ras = _parse_ra_output(SAMPLE_RA_TCPDUMP)
+        assert len(ras) == 2
+
+
 class TestIpv6RaInspectInput:
     def test_defaults(self):
         p = Ipv6RaInspectInput()
@@ -715,7 +769,7 @@ class TestRaInspectCommand:
         assert cmd[:4] == ["timeout", "-s", "INT", "20"]
         assert cmd[4] == "tcpdump"
         assert "-l" in cmd
-        assert "icmp6[0] == 134" in cmd
+        assert "icmp6[0] == 129" in cmd[-1] and "icmp6[0] == 134" in cmd[-1]
         assert exec_timeout == 30  # backstop = duration + 10
         # graceful-stop path: no RAs parsed, rc 124 must not error out
         assert "0 个 RA" in out
