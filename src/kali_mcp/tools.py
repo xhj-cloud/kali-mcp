@@ -78,6 +78,53 @@ def _is_valid_domain(v: str) -> bool:
     )
 
 
+_MASSCAN_PORT_PART_RE = re.compile(r"^(?:[TU]:)?\d+(?:-\d+)?$")
+
+
+def _is_valid_masscan_ports(v: str) -> bool:
+    """Validate a masscan port spec: comma-separated ports and a-b ranges.
+
+    masscan's port spec understands an optional per-part protocol prefix
+    (``U:`` UDP, ``T:`` TCP — bare parts are TCP), e.g. '80,443' or
+    'T:22,U:53' (see the masscan(8) man page: --ports U:161,U:1024-1100).
+    It does NOT understand named sets (top-100) or spaces.
+    """
+    v = v.strip()
+    if not v:
+        return False
+    for part in v.split(","):
+        if not _MASSCAN_PORT_PART_RE.match(part):
+            return False
+        num_part = part.split(":", 1)[1] if ":" in part else part
+        lo_s, _, hi_s = num_part.partition("-")
+        lo, hi = int(lo_s), int(hi_s or lo_s)
+        if lo > 65535 or hi > 65535 or lo > hi:
+            return False
+    return True
+
+
+def _validate_masscan_target(v: str) -> str:
+    """Validate and bound the masscan target.
+
+    masscan is built for large-scale sweeps, so the green-tier wrapper
+    caps address-space size: v4 networks must be /16 or smaller
+    (<= 65,536 hosts), v6 networks /112 or smaller. Single IPs and
+    hostnames are always allowed.
+    """
+    _no_shell_meta(v)
+    if not _is_valid_target(v):
+        raise ValueError(f"Invalid target: {v}")
+    if "/" in v:
+        net = ipaddress.ip_network(v, strict=False)
+        limit = 16 if net.version == 4 else 112
+        if net.prefixlen < limit:
+            raise ValueError(
+                f"Target range too large for masscan: use /{limit} or "
+                f"smaller (fewer hosts); got {v}"
+            )
+    return v
+
+
 # ---------------------------------------------------------------------------
 # Output formatting
 # ---------------------------------------------------------------------------
@@ -1204,12 +1251,152 @@ async def snmp_topology(params: SnmpTopologyInput) -> str:
 
 
 
+class MasscanInput(BaseModel):
+    """Input for high-speed masscan port scanning."""
+
+    target: str = Field(
+        ...,
+        description="Target IP, hostname, or CIDR (v4: /16 or smaller; v6: /112 or smaller), e.g. 192.168.1.0/24, 10.0.0.0/16",
+        min_length=1,
+        max_length=256,
+    )
+    ports: str = Field(
+        default="80,443",
+        description=(
+            "Ports to scan: comma-separated ports and ranges, each part may "
+            "carry a protocol prefix — 'T:' TCP (default when bare) or 'U:' "
+            "UDP (e.g. '80,443', '1-10000', 'T:22,U:53')"
+        ),
+        max_length=512,
+    )
+    rate: int = Field(
+        default=100,
+        description="Probe rate in packets per second (masscan default 100; capped at 10000)",
+        ge=1,
+        le=10000,
+    )
+    banner: bool = Field(
+        default=False,
+        description="Attempt service banner detection on open ports (slower)",
+    )
+    interface: str = Field(
+        default="",
+        description="Network interface to use (e.g. eth0). Auto-detect if empty.",
+        max_length=32,
+    )
+    timeout: int = Field(
+        default=120,
+        description="Maximum scan duration in seconds (partial results are kept)",
+        ge=10,
+        le=600,
+    )
+
+    @field_validator("target")
+    @classmethod
+    def validate_target(cls, v: str) -> str:
+        return _validate_masscan_target(v)
+
+    @field_validator("ports")
+    @classmethod
+    def validate_ports(cls, v: str) -> str:
+        if not _is_valid_masscan_ports(v):
+            raise ValueError(f"Invalid port spec: {v!r}")
+        return v
+
+    @field_validator("interface")
+    @classmethod
+    def validate_iface(cls, v: str) -> str:
+        if v:
+            _no_shell_meta(v)
+        return v
+
+
+def _parse_masscan_found(stdout: str) -> list[tuple[str, int]]:
+    """Extract (host, port) pairs from masscan 'Discovered' output lines."""
+    found: list[tuple[str, int]] = []
+    for line in stdout.splitlines():
+        m = re.match(r"^Discovered\s+(\S+):(\d+)\s+Open", line)
+        if m:
+            found.append((m.group(1), int(m.group(2))))
+    return found
+
+
+def _masscan_output_summary(found: list[tuple[str, int]]) -> str:
+    """Render the open-port summary table from parsed (host, port) pairs."""
+    if not found:
+        return ""
+    by_host: dict[str, set[int]] = {}
+    for host, port in found:
+        by_host.setdefault(host, set()).add(port)
+    lines = [
+        "",
+        "### 📋 开放端口汇总",
+        "",
+        "| 主机 | 开放端口 |",
+        "|------|----------|",
+    ]
+    for host in sorted(by_host):
+        ports = ", ".join(str(p) for p in sorted(by_host[host]))
+        lines.append(f"| `{host}` | {ports} |")
+    lines.append("")
+    lines.append(
+        "> 后续建议：对以上主机用 `nmap_scan`（scan_type=version）做服务详查。"
+    )
+    return "\n".join(lines)
+
+
+async def masscan_scan(params: MasscanInput) -> str:
+    """High-speed port scanning with masscan (thousands of ports per second).
+
+    masscan is a parallelized high-speed scanner: it sweeps port ranges
+    across a whole subnet far faster than nmap. Ideal for a quick
+    'what is up, which ports are open' pass — then use nmap for detailed
+    service/version checks on the hosts it finds.
+
+    Bounded by design (green tier):
+    - v4 targets limited to /16 or smaller, v6 to /112 or smaller
+    - probe rate capped at 10000 pps (default 100)
+    - wall-clock timeout; partial results are kept on timeout
+
+    Use cases:
+    - Quick open-port sweep of a /24 or /16
+    - Find which hosts in a range answer on web ports
+    - Fast pre-scan before a detailed nmap pass
+
+    Requires: masscan (sudo apt install masscan)
+    """
+    # Flag names follow the masscan(8) man page exactly:
+    #   -p PORTS          (bare parts are TCP; prefix parts with U: for UDP)
+    #   --rate RATE       (packets per second)
+    #   --banners         (note: PLURAL in masscan)
+    #   -e IFNAME         (adapter/interface; there is no --interface flag)
+    cmd = ["masscan", "-p", params.ports]
+    cmd.extend(["--rate", str(params.rate)])
+    if params.banner:
+        cmd.append("--banners")
+    if params.interface:
+        cmd.extend(["-e", params.interface])
+    cmd.append(params.target)
+
+    executor = get_executor(timeout=params.timeout)
+    result = await executor.run(cmd, timeout=params.timeout)
+    out = _fmt("masscan Scan", params.target, " ".join(cmd), result)
+
+    found = _parse_masscan_found(result.stdout)
+    if found:
+        out += "\n" + _masscan_output_summary(found)
+    elif result.success:
+        out += "\n\n_(扫描完成 — 未发现开放端口)_"
+    return out
+
+
 # ===================================================================
 # Registry — maps tool names to (async_function, PydanticModel)
 # ===================================================================
 
 TOOL_REGISTRY: dict[str, tuple[callable, type[BaseModel]]] = {
     "nmap_scan": (nmap_scan, NmapInput),
+    "masscan_scan": (masscan_scan, MasscanInput),
     "arp_scan": (arp_scan, ArpScanInput),
     "ping_host": (ping_host, PingInput),
     "traceroute_host": (traceroute_host, TracerouteInput),
