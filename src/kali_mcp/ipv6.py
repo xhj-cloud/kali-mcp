@@ -740,7 +740,7 @@ async def ipv6_ping(params: Ipv6PingInput) -> str:
         cmd = [
             "ping", "-6",
             "-c", str(params.count),
-            "-W", str(params.timeout * 1000),  # iputils -W 单位是毫秒
+            "-W", str(params.timeout),  # iputils -W 单位是秒（毫秒会超上限报 bad linger time）
             params.target,
         ]
         result = await executor.run(cmd)
@@ -756,7 +756,7 @@ async def ipv6_ping(params: Ipv6PingInput) -> str:
         cmd = [
             "ping", "-6",
             "-c", str(params.count),
-            "-W", str(params.timeout * 1000),
+            "-W", str(params.timeout),
             addr,
         ]
         r = await executor.run(cmd, timeout=params.count * params.timeout + 10)
@@ -815,9 +815,9 @@ async def ipv6_traceroute(params: Ipv6TracerouteInput) -> str:
 
     Requires: traceroute（Kali 预装，提供 traceroute6）
     """
+    # traceroute6 本身即 IPv6 专用，不接受 -6 选项（传入会报 "无效的选项 -- 6"）
     cmd = [
         "traceroute6",
-        "-6",
         "-m", str(params.max_hops),
         "-w", str(params.timeout),
         params.target,
@@ -1285,8 +1285,9 @@ async def ipv6_doctor(params: Ipv6DoctorInput) -> str:
         )
 
     # L3 AAAA 解析（不依赖本机 v6 链路 — 解析器本身走 v4 也能查）
+    # dig +short 会混入 CNAME 域名，只保留真实 IPv6 地址
     r3 = await executor.run(["dig", "+short", params.domain, "AAAA"], timeout=20)
-    aaaa = [a for a in r3.stdout.split() if a]
+    aaaa = [a for a in r3.stdout.split() if a and _is_valid_ipv6(a)]
     if aaaa:
         layers.append(
             {"id": "L3", "name": f"AAAA 解析 ({params.domain})", "status": "✅",
@@ -1306,7 +1307,7 @@ async def ipv6_doctor(params: Ipv6DoctorInput) -> str:
         )
     else:
         r4 = await executor.run(
-            ["ping", "-6", "-c", "2", "-W", str(max(params.timeout, 2) * 1000), "2400:3200::1"],
+            ["ping", "-6", "-c", "2", "-W", str(max(params.timeout, 2)), "2400:3200::1"],
             timeout=params.timeout * 3 + 10,
         )
         ok = r4.success and " 0% packet loss" in r4.stdout
@@ -1327,7 +1328,7 @@ async def ipv6_doctor(params: Ipv6DoctorInput) -> str:
         )
     else:
         r5 = await executor.run(
-            ["curl", "-6", "-s", "--max-time", str(params.timeout), "https://6.api.ipify.org"],
+            ["curl", "-6", "-s", "--max-time", str(params.timeout), "https://api6.ipify.org"],
             timeout=params.timeout + 10,
         )
         egress = r5.stdout.strip()
@@ -1585,11 +1586,13 @@ def _rdisc_int(line: str) -> Optional[int]:
 
 
 def _rdisc_bool(line: str) -> Optional[bool]:
-    """valid/invalid value in a rdisc6 label line."""
-    low = line.lower()
-    if "invalid" in low:
+    """Yes/No (real rdisc6 1.0.8) or valid/invalid label value."""
+    val = (
+        line.split(":", 1)[1].strip().lower() if ":" in line else line.strip().lower()
+    )
+    if val in ("no", "invalid", "false", "0"):
         return False
-    if "valid" in low:
+    if val in ("yes", "valid", "true", "1"):
         return True
     return None
 
@@ -1637,6 +1640,12 @@ def _parse_rdisc_output(output: str) -> list[dict]:
         }
         cur_prefix = cur_route = cur_rdns = cur_search = cur_nat64 = None
 
+    # Label lines end their label with a letter/dot/hyphen/space before the
+    # colon ("Hop limit :", "address:", "conf. :") — never with a digit, so
+    # a v6 address's own colons can never be mistaken for a label colon.
+    _field_re = re.compile(r"^[A-Za-z][A-Za-z0-9 .\-]*[A-Za-z .\-]\s*:")
+    _from_re = re.compile(r"^from\s+([0-9A-Fa-f:]+)$", re.I)
+
     for line in output.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith(
@@ -1647,14 +1656,29 @@ def _parse_rdisc_output(output: str) -> list[dict]:
         if m:
             _new_router(m.group(1))
             continue
-        # Fallback header: an unindented line ending in an IPv6 address that
-        # we did not recognise (works even for the very first line).
-        if cur is None:
-            if not line[:1].isspace():
+        # Real rdisc6 1.0.8: the router source appears as an indented
+        # " from <addr>" line closing each RA block.
+        m_from = _from_re.match(stripped)
+        if m_from:
+            if cur is None:
+                _new_router(m_from.group(1))
+            else:
+                cur["src"] = m_from.group(1)
+                cur["_sealed"] = True
+            continue
+        # No current router (or the previous block already closed): a field
+        # line opens the next RA block; an unindented line ending in an IPv6
+        # address is an unrecognised router header.
+        if cur is None or cur.get("_sealed"):
+            if _field_re.match(stripped):
+                _new_router(None)
+            elif not line[:1].isspace():
                 m2 = re.search(r"([0-9A-Fa-f:]+)$", stripped)
                 if m2 and ":" in m2.group(1):
                     _new_router(m2.group(1))
-            continue
+                continue
+            else:
+                continue
 
         low = stripped.lower()
 
@@ -1751,6 +1775,8 @@ def _parse_rdisc_output(output: str) -> list[dict]:
                     _new_router(m2.group(1))
     if cur is not None:
         routers.append(cur)
+    for r in routers:
+        r.pop("_sealed", None)
     return routers
 
 

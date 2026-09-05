@@ -35,8 +35,10 @@ from kali_mcp.ipv6 import (
     _slaac_candidate,
     _validate_v6_subnet,
     _v4_neigh_macs,
+    ipv6_doctor,
     ipv6_recon,
     ipv6_service_scan,
+    ipv6_traceroute,
 )
 
 
@@ -154,6 +156,28 @@ class TestIpv6TracerouteInput:
     def test_rejects_shell_meta(self):
         with pytest.raises(ValidationError):
             Ipv6TracerouteInput(target="baidu.com|id")
+
+
+class TestIpv6TracerouteCmd:
+    """Regression: traceroute6 不接受 -6 选项（会报 "无效的选项 -- 6"）。"""
+
+    def test_cmd_has_no_dashesix_flag(self, monkeypatch):
+        import kali_mcp.ipv6 as v6
+
+        captured = {}
+
+        class _CapEx:
+            async def run(self, cmd, timeout=None, input_data=None):
+                captured["cmd"] = cmd
+                return CommandResult(stdout="", stderr="", returncode=0, success=True)
+
+        monkeypatch.setattr(v6, "get_executor", lambda timeout=None: _CapEx())
+        out = _run(ipv6_traceroute(Ipv6TracerouteInput(target="2400:3200::1")))
+        assert isinstance(out, str)
+        cmd = captured["cmd"]
+        assert "traceroute6" in cmd
+        assert "-6" not in cmd, "traceroute6 是 IPv6 专用，-6 是非法选项"
+        assert "2400:3200::1" in cmd
 
 
 class TestIpv6DigInput:
@@ -522,6 +546,59 @@ class TestIpv6DoctorInput:
             Ipv6DoctorInput(timeout=1)
 
 
+class TestIpv6DoctorCmds:
+    """Regression: iputils ping 的 -W 单位是秒；传毫秒（*1000）会超上限，
+    报 "ping: bad linger time: 6000"。"""
+
+    def test_l4_ping_wait_is_in_seconds(self, monkeypatch):
+        import kali_mcp.ipv6 as v6
+
+        captured: list = []
+
+        class _CapEx:
+            async def run(self, cmd, timeout=None, input_data=None):
+                captured.append(list(cmd))
+                joined = " ".join(cmd)
+                if joined.startswith("ip -6 addr"):
+                    out = (
+                        "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500\n"
+                        "    inet6 2409:8931:1247:7f4:250:56ff:fe27:ce21/64 "
+                        "scope global dynamic mngtmpaddr\n"
+                        "    inet6 fe80::250:56ff:fe27:ce21/64 scope link\n"
+                    )
+                elif "route" in joined:
+                    out = "default via fe80::905b:f4ff:fe9a:f655 dev eth0"
+                elif "dig" in joined:
+                    # +short 会混入 CNAME 行，只有最后一个是真实 AAAA
+                    out = "www-apple-com.v.aaplimg.com.\n2400:3200::1\n"
+                elif "ping" in joined:
+                    out = (
+                        "2 packets transmitted, 2 received, 0% packet loss\n"
+                        "rtt min/avg/max/mdev = 40.0/41.0/42.0/1.0 ms\n"
+                    )
+                elif "curl" in joined:
+                    out = "2409:8931:1247:7f4:250:56ff:fe27:ce21"
+                else:
+                    out = ""
+                return CommandResult(stdout=out, stderr="", returncode=0, success=True)
+
+        monkeypatch.setattr(v6, "get_executor", lambda timeout=None: _CapEx())
+        out = _run(ipv6_doctor(Ipv6DoctorInput()))
+        assert isinstance(out, str)
+        ping_cmds = [c for c in captured if c and c[0] == "ping"]
+        assert ping_cmds, "doctor 应执行 L4 公网 ping"
+        c = ping_cmds[0]
+        w = int(c[c.index("-W") + 1])
+        assert w <= 30, f"-W 应为秒（默认 timeout=6），实际 {w}"
+        # L3 结论行不应把 CNAME 域名显示为 AAAA 结果（raw 证据区除外）
+        l3_line = next(l for l in out.splitlines() if l.startswith("| L3 "))
+        assert "aaplimg" not in l3_line
+        assert "2400:3200::1" in l3_line
+        # L5 用可解析的 api6.ipify.org 端点
+        curl_cmds = [c for c in captured if c and c[0] == "curl"]
+        assert curl_cmds and "api6.ipify.org" in " ".join(curl_cmds[0])
+
+
 # ---------------------------------------------------------------------------
 # ipv6_status config-source analysis
 # ---------------------------------------------------------------------------
@@ -817,6 +894,85 @@ class TestParseRdiscOutput:
         assert len(routers) == 1
         assert routers[0]["src"] == "fe80::254"
         assert routers[0]["hop_limit"] == 64
+
+
+# Real rdisc6 1.0.8 (ndisc6) capture — no "received from" header; the
+# router source arrives as an indented " from <addr>" line at the END of
+# the block, booleans are Yes/No.
+SAMPLE_RDISC_REAL = """Soliciting ff02::2 (ff02::2) on eth0...
+
+Hop limit                 :          254 (      0xfe)
+Stateful address conf.    :           No
+Stateful other conf.      :           No
+Mobile home agent         :           No
+Router preference         :         high
+Neighbor discovery proxy  :           No
+Router lifetime           :         7200 (0x00001c20) seconds
+Reachable time            :  unspecified (0x00000000)
+Retransmit time           :  unspecified (0x00000000)
+ Source link-layer address: 92:5B:F4:9A:F6:55
+ MTU                      :         1500 bytes (valid)
+ Prefix                   : 2409:8931:1247:7f4::/64
+  On-link                 :          Yes
+  Autonomous address conf.:          Yes
+  Valid time              :         7200 (0x00001c20) seconds
+  Pref. time              :         7200 (0x00001c20) seconds
+ Recursive DNS server     : 2409:8931:1247:7f4::77
+  DNS server lifetime     :         7200 (0x00001c20) seconds
+ from fe80::905b:f4ff:fe9a:f655
+"""
+
+
+class TestParseRdiscRealFormat:
+    def test_parses_real_ra(self):
+        routers = _parse_rdisc_output(SAMPLE_RDISC_REAL)
+        assert len(routers) == 1
+        rt = routers[0]
+        assert rt["src"] == "fe80::905b:f4ff:fe9a:f655"
+        assert rt["hop_limit"] == 254
+        assert rt["stateful_addr"] is False
+        assert rt["stateful_other"] is False
+        assert rt["mha"] is False
+        assert rt["proxy"] is False
+        assert rt["pref"] == "high"
+        assert rt["lifetime"] == 7200
+        assert rt["reachable"] is None
+        assert rt["retrans"] is None
+        assert rt["lla"] == "92:5B:F4:9A:F6:55"
+        assert rt["mtu"] == 1500
+        assert "_sealed" not in rt
+
+    def test_real_prefix_and_rdns(self):
+        rt = _parse_rdisc_output(SAMPLE_RDISC_REAL)[0]
+        assert len(rt["prefixes"]) == 1
+        p = rt["prefixes"][0]
+        assert p["prefix"] == "2409:8931:1247:7f4::"
+        assert p["plen"] == 64
+        assert p["onlink"] is True
+        assert p["autoconf"] is True
+        assert p["valid"] == 7200
+        assert p["pref"] == 7200
+        assert rt["rdns"] == [
+            {"server": "2409:8931:1247:7f4::77", "lifetime": 7200}
+        ]
+
+    def test_two_real_blocks(self):
+        # Second RA block (no re-printed "Soliciting" line between blocks)
+        out = SAMPLE_RDISC_REAL + (
+            "Hop limit                 :          255 (      0xff)\n"
+            "Router lifetime           :         1800 (0x00000708) seconds\n"
+            " Prefix                   : 2409:8931:1247:7f5::/64\n"
+            "  On-link                 :          Yes\n"
+            " from fe80::aa\n"
+        )
+        routers = _parse_rdisc_output(out)
+        assert [r["src"] for r in routers] == [
+            "fe80::905b:f4ff:fe9a:f655",
+            "fe80::aa",
+        ]
+        assert len(routers[1]["prefixes"]) == 1
+        assert routers[1]["prefixes"][0]["prefix"] == "2409:8931:1247:7f5::"
+        assert routers[1]["hop_limit"] == 255
 
 
 SAMPLE_NMAP6_SVC = """Starting Nmap 7.92 ( https://nmap.org ) at 2025-01-01 00:00 UTC
