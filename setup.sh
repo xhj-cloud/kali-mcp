@@ -124,7 +124,8 @@ PENTEST_PKGS=(
     nuclei
     ffuf
     subfinder       # subfinder_scan — 被动子域发现
-    httpx           # httpx_probe — web 服务存活探测
+    # NOTE: httpx (ProjectDiscovery) and dalfox are NOT in Kali/Debian apt
+    # — see _web_binaries_setup() below (GitHub release binaries).
     dnsx            # dnsx_lookup — 批量 DNS 记录
     dnsrecon
     snmp
@@ -142,6 +143,82 @@ _nuclei_setup() {
         nuclei -ut -silent 2>&1 | tail -1 || true
         ok "nuclei templates ready"
     fi
+}
+
+# --- Web probe binaries NOT in apt: httpx (ProjectDiscovery), dalfox ---
+# Kali/Debian apt does not ship ProjectDiscovery httpx (where a package
+# named httpx exists it is an unrelated curl-style client), and dalfox
+# (hahwul/dalfox) has no distro packaging at all. Install official GitHub
+# release binaries: httpx from a zip asset, dalfox from a .deb asset
+# (sha256 verified against the release .sha256 file when reachable).
+_web_binaries_setup() {
+    local GH="https://github.com"
+    local HTTPX_VERSION="1.11.0"
+    local DALFOX_VERSION="3.2.2"
+    local ARCH
+    case "$(uname -m)" in
+        aarch64|arm64) ARCH="arm64" ;;
+        x86_64|amd64)  ARCH="amd64" ;;
+        *)
+            warn "Unsupported arch '$(uname -m)' for web binaries; skipping"
+            return 0
+            ;;
+    esac
+    local DL_TMP; DL_TMP="$(mktemp -d)"
+    local url i
+
+    # --- httpx (zip asset: httpx_vX.Y.Z_linux_<arch>.zip) ---
+    if httpx --version 2>&1 | grep -Eq "v[0-9]+\.[0-9]+"; then
+        ok "httpx already present: $(httpx --version 2>&1 | head -1)"
+    else
+        echo -e "  Installing ProjectDiscovery httpx ${HTTPX_VERSION} (${ARCH})..."
+        command -v unzip &>/dev/null || $SUDO apt install -y -qq unzip 2>&1 | tail -1
+        url="${GH}/projectdiscovery/httpx/releases/download/v${HTTPX_VERSION}/httpx_v${HTTPX_VERSION}_linux_${ARCH}.zip"
+        for i in 1 2 3 4 5 6; do
+            curl -sL --retry 3 --retry-all-errors --max-time 120 \
+                -o "$DL_TMP/httpx.zip" "$url" && [ -s "$DL_TMP/httpx.zip" ] && break
+            echo "  retry $i"; sleep 8
+        done
+        if [ -s "$DL_TMP/httpx.zip" ]; then
+            unzip -o -q "$DL_TMP/httpx.zip" httpx -d "$DL_TMP" && \
+                $SUDO install -m 755 "$DL_TMP/httpx" /usr/local/bin/httpx && \
+                ok "httpx $(/usr/local/bin/httpx --version 2>&1 | head -1)" || \
+                warn "httpx install failed (check network / $url)"
+        else
+            warn "httpx download failed (check network / $url)"
+        fi
+    fi
+
+    # --- dalfox (.deb asset: dalfox-vX.Y.Z-linux-<aarch64|x86_64>.deb) ---
+    if command -v dalfox &>/dev/null; then
+        ok "dalfox already present: $(dalfox --version 2>&1 | head -1)"
+    else
+        echo -e "  Installing dalfox v${DALFOX_VERSION} (${ARCH})..."
+        local DEB_ARCH=$ARCH
+        [ "$ARCH" = "arm64" ] && DEB_ARCH="aarch64"
+        [ "$ARCH" = "amd64" ] && DEB_ARCH="x86_64"
+        url="${GH}/hahwul/dalfox/releases/download/v${DALFOX_VERSION}/dalfox-v${DALFOX_VERSION}-linux-${DEB_ARCH}.deb"
+        for i in 1 2 3 4 5 6; do
+            curl -sL --retry 3 --retry-all-errors --max-time 120 \
+                -o "$DL_TMP/dalfox.deb" "$url" && [ -s "$DL_TMP/dalfox.deb" ] && break
+            echo "  retry $i"; sleep 8
+        done
+        if [ -s "$DL_TMP/dalfox.deb" ]; then
+            local want got
+            want="$(curl -sL --max-time 30 "${url}.sha256" 2>/dev/null | awk '{print $1}')"
+            got="$(sha256sum "$DL_TMP/dalfox.deb" | awk '{print $1}')"
+            if [ -n "$want" ] && [ "$want" != "$got" ]; then
+                warn "dalfox sha256 MISMATCH — refusing to install"
+            else
+                $SUDO dpkg -i "$DL_TMP/dalfox.deb" >/dev/null 2>&1 && \
+                    ok "dalfox $(dalfox --version 2>&1 | head -1)" || \
+                    warn "dalfox install failed"
+            fi
+        else
+            warn "dalfox download failed (check network / $url)"
+        fi
+    fi
+    rm -rf "$DL_TMP"
 }
 
 # --- vuls (system_patch_audit, 🔴 ATTACK tool) ---
@@ -245,6 +322,7 @@ if [ "$TOOL_LEVEL" = "pentest" ] || [ "$TOOL_LEVEL" = "full" ]; then
     $SUDO apt install -y -qq "${PENTEST_PKGS[@]}" 2>&1 | tail -1
     ok "Pentest packages ($(echo "${PENTEST_PKGS[@]}" | wc -w) pkgs)"
     _nuclei_setup
+    _web_binaries_setup
 fi
 
 if [ "$TOOL_LEVEL" = "full" ]; then

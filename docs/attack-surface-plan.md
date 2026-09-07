@@ -7,7 +7,7 @@
 > - 2026-09-05 ✅ P0-2 masscan 完成（代码 + 53 个测试，381 全绿）。**门控决策：定为 🟢 绿色**（与 nmap_scan 同级，始终可用），
 >   比原方案（🟡）更宽——安全靠内置约束兜底：v4 限 /16、v6 限 /112、速率上限 10000pps、墙钟超时保留部分结果。
 >   CLI 细节以 masscan(8) man page 为准：`--banners`（复数）、`-e IFNAME`（无 --interface）、UDP 用 `U:` 端口前缀（无 -sU）。
->   待办：回内网后 Kali 上 live 验证 + 部署（masscan 需 `apt install masscan`）。
+>   待办：回内网后 Kali 上 live 验证 + 部署（masscan 需 `apt install masscan`）——2026-09-07 ✅ 已闭环（见下条）。
 > - 2026-09-07 ✅ P0-1 Web 侦察管线完成（新模块 `recon.py`：subfinder_scan / httpx_probe / dnsx_lookup，
 >   🟡 门控，70 个新测试，451 全绿）。CLI 以 projectdiscovery **main 分支 Go 源码**为 ground truth，
 >   抓出 5 个文档级坑：① subfinder JSONL 用 `host` 键（旧文档写 `domain`，解析双兼容）；② httpx 标题/技术栈
@@ -17,7 +17,22 @@
 >   httpx 目标走 **stdin**（无 -u/-l 时 `fileutil.HasStdin()` 生效），避免长列表 argv 溢出。
 >   2026-09-07 ✅ 已部署 Kali 并 live 验证：subfinder/dnsx 走 apt（2.16.0/1.3.0），httpx 不在 Kali apt、
 >   从 GitHub release v1.11.0 装 arm64 二进制到 /usr/local/bin（与 curl 系 /usr/bin/httpx 共存，PATH 优先）。
->   服务 73 工具生效，httpx 探测本机 MCP 端口成功（uvicorn 指纹），dnsx 经 `-l` 修复后待复测。
+>   服务 73 工具生效，httpx 探测本机 MCP 端口成功（uvicorn 指纹），dnsx 经 `-l` 修复后复测通过。
+> - 2026-09-07 ✅ P0-2 masscan **live 验证闭环**（MCP 协议真调 `masscan_scan` 扫 192.168.0.0/24）：
+>   live 一跑抓出 2 个真 bug——① 输出解析正则照的是不存在的格式（真实行格式
+>   `Discovered open port 80/tcp on 192.168.0.68`，旧正则匹配 `Discovered ip:port Open`，
+>   导致汇总表不渲染 + 误报"未发现开放端口"）；② stderr 的 `\r` 进度条把报告灌爆
+>   （现折叠为仅保留最终 tick）。修复后 27 个开放端口正确汇总，与 nmap 交叉验证一致，
+>   且抓到 nmap 主机发现漏掉的 `.234:3389`（RDP）。测试更新为真实格式 + 新增折叠测试。
+> - 2026-09-07 ✅ P1-4 dalfox 完成（`dalfox_scan` 🟡，v3.2.2，27 个新测试，480 全绿，
+>   总数 74 = 🟢30/🟡20/🔴24）。CLI 以 **v3.2.2 实机 --help + 本地 echo 服务真实 XSS 检出**为 ground truth，
+>   抓出 4 个坑：① repo 两次迁移——`projectdiscovery/dalfox` → `atasky/dalfox` → **`hahwul/dalfox`**
+>   （旧路径 API 全 404，原计划"Kali 仓库有 dalfox"的假设也是错的）；② Kali/Debian apt 均无 dalfox，
+>   从 GitHub release 装 `.deb`（sha256 对 release `.sha256` 文件校验一致）；③ v3 CLI 与 v1 记忆完全不同：
+>   `scan` 子命令、JSON 走 `-f json`（**无 --json 标志**）、位置参数 TARGET；④ **退出码 1 = 发现漏洞**
+>   （非执行失败），JSON 结构 `{"findings":[{type V/R/A/I, severity, param, location, payload,
+>   data(POC URL), ...}], "meta":{...}}`。另：httpx/dalfox 的安装逻辑已并入 setup.sh
+>   `_web_binaries_setup`（架构检测 + 重试 + sha256），并从 apt 包列表移除不存在的 `httpx`。
 
 ## 一、缺口盘点（对照 2026 竞品）
 
@@ -48,7 +63,7 @@
 - 补：web 攻击面入口（subfinder → dnsx → httpx → nuclei/ffuf 全管线）
 - 依赖：Kali 仓库三件套（已加入 setup.sh PENTEST_PKGS；aarch64 版本待回内网确认，太旧装官方 release 二进制）
 
-### P0-2 快扫：masscan（0.5 天，✅ 已完成 — 定为 🟢 与 nmap_scan 同级）
+### P0-2 快扫：masscan（0.5 天，✅ 已完成 — 定为 🟢 与 nmap_scan 同级；2026-09-07 live 验证闭环）
 - `masscan_scan`：目标（v4≤/16、v6≤/112 硬约束）+ 端口（支持 `T:`/`U:` 前缀）+ 速率（默认 100、上限 10000pps）+ banner + 接口（`-e`）+ 超时（默认 120s、上限 600s，保留部分结果）
 - 输出：原始输出 + 自动解析的"开放端口汇总表"（按主机分组）+ nmap 详查建议
 - 与 nmap 形成"快扫→详查"两级
@@ -85,9 +100,10 @@
 - `rubeus_kerberoast` / `rubeus_asreproast` / `rubeus_golden`（仅 lab）
 - 依赖：Kali 仓库预装（.NET，aarch64 可用）
 
-### P1-4 XSS：dalfox（0.5 天，🟡）
-- `dalfox_scan`（JSON 输出）
-- 补 web 应用最后一块；依赖：Kali 仓库有
+### P1-4 XSS：dalfox（0.5 天，🟡，✅ 已完成 2026-09-07）
+- `dalfox_scan`（`-f json` 输出，findings V/R/A/I 分级 + 可复现 POC URL）
+- 补 web 应用最后一块（subfinder → httpx → **dalfox/nuclei**）
+- 依赖修正：Kali 仓库**没有** dalfox——装 hahwul/dalfox GitHub release `.deb`（setup.sh 已内置）
 
 ## 五、P2 — 观察/暂缓（明确现在不做）
 
@@ -117,7 +133,8 @@
 4. 交付：GitHub + Gitea 双推
 
 **环境前置（一次性，Kali 回内网后）**：
-- apt 确认 subfinder/httpx/dnsx/dalfox/masscan/impacket/rubeus 版本（aarch64）
+- apt 确认 subfinder/dnsx/masscan/impacket/rubeus 版本（aarch64）；httpx/dalfox 不在 apt——
+  装 GitHub release 二进制（setup.sh `_web_binaries_setup`：httpx zip / dalfox deb，sha256 校验）
 - pip 装 python-metasploit3 + bloodhound-python
 - git 装 linpeas + winpeas 两个脚本
 - systemd 起 msfrpcd（密码走 .env）

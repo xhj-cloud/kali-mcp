@@ -17,15 +17,19 @@ import pytest
 from kali_mcp.executor import CommandResult
 from kali_mcp.recon import (
     RECON_TOOLS,
+    DalfoxInput,
     DnsxInput,
     HttpxInput,
     SubfinderInput,
+    _dalfox_cmd,
     _httpx_entry_host,
     _httpx_report,
     _dnsx_report,
+    _parse_dalfox,
     _parse_subfinder,
     _subfinder_cmd,
     _subfinder_report,
+    dalfox_scan,
     dnsx_lookup,
     httpx_probe,
     subfinder_scan,
@@ -46,7 +50,12 @@ class TestReconGating:
     """🟡 gating: the trio lives in RECON_TOOLS only, never unconditionally."""
 
     def test_trio_registered(self):
-        assert set(RECON_TOOLS) == {"subfinder_scan", "httpx_probe", "dnsx_lookup"}
+        assert set(RECON_TOOLS) == {
+            "subfinder_scan",
+            "httpx_probe",
+            "dnsx_lookup",
+            "dalfox_scan",
+        }
         for name, (func, model) in RECON_TOOLS.items():
             assert callable(func)
             assert model.__name__
@@ -685,3 +694,323 @@ class TestDnsxOutput:
         )
         assert "dnsx 执行失败" in out
         assert "apt install dnsx" in out
+
+
+# ===================================================================
+# dalfox (v3) — XSS scan
+# ===================================================================
+
+
+class TestDalfoxInput:
+    def test_defaults(self):
+        m = DalfoxInput(url="http://192.168.0.1:80/x?id=1")
+        assert m.method == "GET"
+        assert m.workers == 50
+        assert m.timeout == 10
+        assert m.scan_timeout == 120
+        assert m.rate_limit == 0
+        assert not m.follow_redirects
+        assert not m.discovery_only
+        assert m.wall_timeout == 300
+        assert m.max_results == 50
+
+    def test_method_normalized_to_uppercase(self):
+        assert DalfoxInput(url="http://a.com/", method="post").method == "POST"
+
+    def test_bad_method_rejected(self):
+        with pytest.raises(Exception):
+            DalfoxInput(url="http://a.com/", method="G")
+        with pytest.raises(Exception):
+            DalfoxInput(url="http://a.com/", method="get;rm")
+
+    def test_url_scheme_required(self):
+        with pytest.raises(Exception):
+            DalfoxInput(url="192.168.0.1:80")
+
+    def test_shell_meta_rejected_in_host(self):
+        with pytest.raises(Exception):
+            DalfoxInput(url="http://127.0.0.1$(reboot)/x")
+
+    def test_query_shell_chars_allowed(self):
+        # & ; $ etc. are legitimate in query strings and safe here: the
+        # command runs as an argv list, never through a shell
+        m = DalfoxInput(url="http://127.0.0.1/?a=1&b=2;c=3")
+        assert m.url.endswith("a=1&b=2;c=3")
+
+    def test_control_chars_rejected_in_url(self):
+        with pytest.raises(Exception):
+            DalfoxInput(url="http://a.com/\n/x")
+
+    def test_header_pairs_valid(self):
+        m = DalfoxInput(
+            url="http://a.com/",
+            headers="X-Api-Token: abc,Referer: http://x.example/",
+        )
+        # value with a colon (URL) must survive: split on FIRST colon only
+        assert "Referer: http://x.example/" in m.headers
+
+    def test_header_pairs_invalid(self):
+        with pytest.raises(Exception):
+            DalfoxInput(url="http://a.com/", headers="no-colon-here")
+        with pytest.raises(Exception):
+            DalfoxInput(url="http://a.com/", headers="Bad Name: x")
+
+    def test_params_valid_with_type_suffix(self):
+        m = DalfoxInput(url="http://a.com/", params="id,q:body,user[0]:header")
+        assert "q:body" in m.params
+
+    def test_params_invalid_rejected(self):
+        with pytest.raises(Exception):
+            DalfoxInput(url="http://a.com/", params="id;rm")
+        with pytest.raises(Exception):
+            DalfoxInput(url="http://a.com/", params="id:badtype")
+
+    def test_json_body_with_shell_chars_allowed(self):
+        # argv-list execution: JSON braces/semicolons are safe and must work
+        m = DalfoxInput(
+            url="http://a.com/api",
+            data='{"id": 1; "x": "$HOME"}',
+        )
+        assert "{" in m.data
+
+    def test_body_control_chars_rejected(self):
+        with pytest.raises(Exception):
+            DalfoxInput(url="http://a.com/", data="a=1\r\nEvil: 1")
+
+    def test_blind_callback_must_be_http(self):
+        with pytest.raises(Exception):
+            DalfoxInput(url="http://a.com/", blind="example.com/cb")
+        assert DalfoxInput(url="http://a.com/", blind="http://cb.example/")
+
+
+class TestDalfoxCmd:
+    def _capture(self, monkeypatch, params, stdout="", success=True, stderr=""):
+        import kali_mcp.recon as r
+
+        captured = {}
+
+        class _CapEx:
+            async def run(self, cmd, timeout=None, input_data=None):
+                captured["cmd"] = cmd
+                captured["timeout"] = timeout
+                return CommandResult(
+                    stdout=stdout,
+                    stderr=stderr,
+                    returncode=0 if success else 1,
+                    success=success,
+                )
+
+        monkeypatch.setattr(r, "get_executor", lambda timeout=None: _CapEx())
+        out = _run(dalfox_scan(params))
+        assert isinstance(out, str)
+        return captured, out
+
+    def test_default_cmd(self, monkeypatch):
+        captured, _ = self._capture(
+            monkeypatch, DalfoxInput(url="http://a.com/x?id=1")
+        )
+        cmd = captured["cmd"]
+        assert cmd[0] == "dalfox"
+        assert cmd[1] == "scan"  # v3 subcommand
+        # v3 JSON is -f json — there is NO --json flag
+        assert cmd[cmd.index("-f") + 1] == "json"
+        assert "--json" not in cmd
+        assert "-S" in cmd
+        assert "--no-color" in cmd
+        assert cmd[cmd.index("--workers") + 1] == "50"
+        assert cmd[cmd.index("--timeout") + 1] == "10"
+        assert cmd[cmd.index("--scan-timeout") + 1] == "120"
+        assert cmd[-1] == "http://a.com/x?id=1"
+        # flags that do not exist in dalfox v3
+        assert "--active" not in cmd
+        assert "-u" not in cmd
+        assert "--jsonl" not in cmd
+
+    def test_optional_flags(self, monkeypatch):
+        captured, _ = self._capture(
+            monkeypatch,
+            DalfoxInput(
+                url="http://a.com/x",
+                method="post",
+                data="id=1",
+                headers="X-Api-Token: abc,Referer: http://r.example/",
+                cookies="session=abc",
+                blind="http://cb.example/",
+                follow_redirects=True,
+                discovery_only=True,
+                rate_limit=20,
+                scan_timeout=0,
+                workers=10,
+            ),
+        )
+        cmd = captured["cmd"]
+        assert cmd[cmd.index("-X") + 1] == "POST"
+        assert cmd[cmd.index("-d") + 1] == "id=1"
+        assert cmd.count("-H") == 2
+        assert "X-Api-Token:abc" in cmd
+        assert "Referer:http://r.example/" in cmd
+        assert cmd[cmd.index("--cookies") + 1] == "session=abc"
+        assert cmd[cmd.index("-b") + 1] == "http://cb.example/"
+        assert "-F" in cmd
+        assert "--only-discovery" in cmd
+        assert cmd[cmd.index("--rate-limit") + 1] == "20"
+        assert "--scan-timeout" not in cmd  # 0 = off, flag omitted
+        assert cmd[cmd.index("--workers") + 1] == "10"
+
+    def test_param_specs_repeated_flag(self, monkeypatch):
+        captured, _ = self._capture(
+            monkeypatch, DalfoxInput(url="http://a.com/x", params="id,q:body")
+        )
+        cmd = captured["cmd"]
+        assert cmd.count("-p") == 2
+        assert cmd[cmd.index("-p") + 1] == "id"
+        assert cmd[-2] == "q:body"
+
+    def test_wall_timeout_forwarded(self, monkeypatch):
+        captured, _ = self._capture(
+            monkeypatch, DalfoxInput(url="http://a.com/x", wall_timeout=600)
+        )
+        assert captured["timeout"] == 600
+
+
+_DALFOX_SAMPLE = json.dumps(
+    {
+        "findings": [
+            {
+                "confidence": "high",
+                "confidence_reason": "payload reached an executable position",
+                "cwe": "CWE-79",
+                "data": "http://127.0.0.1:18080/?id=%3Csvg%20onload%3Dalert%281%29%3E",
+                "detection_method": "reflection",
+                "evidence": "DOM verification successful for param id",
+                "inject_type": "inHTML",
+                "location": "Query",
+                "message_id": 606,
+                "message_str": "Triggered XSS Payload (DOM marker)",
+                "method": "GET",
+                "param": "id",
+                "payload": "<svg onload=alert(1) class=dlx123>",
+                "severity": "High",
+                "type": "V",
+                "type_description": "Vulnerable - act on it",
+            },
+            {
+                "severity": "Medium",
+                "type": "R",
+                "param": "q",
+                "location": "Query",
+                "payload": "<img src=x onerror=alert(1)>",
+                "detection_method": "reflection",
+            },
+        ],
+        "meta": {
+            "dalfox_version": "3.2.2",
+            "findings_count": 2,
+            "incomplete": False,
+            "scan_duration_ms": 4521,
+            "target_summary": [
+                {
+                    "findings_count": 2,
+                    "status": "vulnerable",
+                    "target": "http://127.0.0.1:18080/",
+                }
+            ],
+            "targets": ["http://127.0.0.1:18080/?q=hello&id=42"],
+            "total_requests": 1240,
+        },
+    }
+)
+
+
+class TestDalfoxOutput:
+    def test_parse_findings_and_meta(self):
+        findings, meta = _parse_dalfox(_DALFOX_SAMPLE)
+        assert len(findings) == 2
+        assert findings[0]["type"] == "V"
+        assert findings[0]["param"] == "id"
+        assert meta["dalfox_version"] == "3.2.2"
+        assert meta["total_requests"] == 1240
+
+    def test_parse_malformed_returns_empty(self):
+        assert _parse_dalfox("no json here") == ([], {})
+        assert _parse_dalfox("") == ([], {})
+        assert _parse_dalfox("[1,2,3]") == ([], {})
+
+    def test_parse_tolerates_surrounding_logs(self):
+        doc = "DBG starting scan\n" + _DALFOX_SAMPLE + "\nWRN done"
+        findings, meta = _parse_dalfox(doc)
+        assert len(findings) == 2
+        assert meta["findings_count"] == 2
+
+    def test_report_with_vuln_findings(self):
+        import kali_mcp.recon as r
+
+        findings, meta = _parse_dalfox(_DALFOX_SAMPLE)
+        p = DalfoxInput(url="http://127.0.0.1:18080/?q=hello&id=42")
+        report = r._dalfox_report(p, findings, meta)
+        assert "## 🦊 dalfox" in report
+        assert "1 个已验证可利用的 XSS" in report
+        assert "| High | V (vulnerable) | `id` | Query |" in report
+        assert "<svg onload=alert(1) class=dlx123>" in report
+        # POC section with the reproducible URL
+        assert "### 🧪 可复现 POC" in report
+        assert "http://127.0.0.1:18080/?id=%3Csvg%20onload%3Dalert%281%29%3E" in report
+        # stats line
+        assert "1240 requests" in report
+        # the R finding is counted as not-verified
+        assert "1 条仅反射/信息类发现" in report
+
+    def test_report_clean(self):
+        import kali_mcp.recon as r
+
+        p = DalfoxInput(url="http://a.com/")
+        report = r._dalfox_report(p, [], {"findings_count": 0, "total_requests": 164, "scan_duration_ms": 26})
+        assert "未发现 XSS" in report
+
+    def test_report_truncated_by_max_results(self):
+        import kali_mcp.recon as r
+
+        findings = [
+            {
+                "type": "V",
+                "severity": "High",
+                "param": f"p{i}",
+                "location": "Query",
+                "payload": "x",
+                "data": f"http://a.com/?p{i}=x",
+            }
+            for i in range(30)
+        ]
+        p = DalfoxInput(url="http://a.com/", max_results=5)
+        report = r._dalfox_report(p, findings, {})
+        assert "另有 25 条未显示" in report
+
+    def test_end_to_end_exit1_with_findings_is_not_failure(self, monkeypatch):
+        """Live-verified behavior: dalfox exits 1 when it FINDS XSS —
+        with stdout present the tool must report findings, not failure."""
+        _, out = TestDalfoxCmd()._capture(
+            monkeypatch,
+            DalfoxInput(url="http://127.0.0.1:18080/?q=hello&id=42"),
+            stdout=_DALFOX_SAMPLE,
+            success=False,
+        )
+        assert "❌ dalfox 执行失败" not in out
+        assert "1 个已验证可利用的 XSS" in out
+
+    def test_end_to_end_success_clean(self, monkeypatch):
+        clean = json.dumps({"findings": [], "meta": {"findings_count": 0, "total_requests": 164, "scan_duration_ms": 26}})
+        _, out = TestDalfoxCmd()._capture(
+            monkeypatch, DalfoxInput(url="http://a.com/"), stdout=clean
+        )
+        assert "未发现 XSS" in out
+
+    def test_end_to_end_failure_hints_install(self, monkeypatch):
+        _, out = TestDalfoxCmd()._capture(
+            monkeypatch,
+            DalfoxInput(url="http://a.com/"),
+            stdout="",
+            success=False,
+            stderr="exec: \"dalfox\": executable file not found",
+        )
+        assert "dalfox 执行失败" in out
+        assert "hahwul/dalfox" in out

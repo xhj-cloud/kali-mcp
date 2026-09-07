@@ -1,5 +1,6 @@
 """
-Web recon pipeline — the ProjectDiscovery trio (subfinder + httpx + dnsx).
+Web recon pipeline — the ProjectDiscovery trio (subfinder + httpx + dnsx)
+plus dalfox v3 (XSS attack step of the same pipeline).
 
 🟡 Pentest level. Enable via PENTEST_ENABLED=true in .env.
 
@@ -8,16 +9,18 @@ Tools:
                       active traffic toward the target)
   2. httpx_probe    — batch probe of live web services (status/title/tech/ports)
   3. dnsx_lookup    — batch DNS record discovery (A/AAAA/CNAME/NS/MX/TXT/...)
+  4. dalfox_scan    — XSS scan with verified, reproducible POCs (reflection + DOM)
 
 Design notes:
-  - All three emit JSONL (JSON-native) and are parsed into structured
+  - All four emit JSON (JSON-native) and are parsed into structured
     Markdown for LLM consumption — no raw-dump fallback.
   - Command lists only, never shell=True; every user string passes
     _no_shell_meta plus a tool-specific shape check.
   - Input bounds: ≤200 targets/domains per call, port ≤65535, wall-clock
     timeouts on every run (partial results kept by the executor on timeout).
 
-CLI ground truth (verified against upstream Go sources, main branch):
+CLI ground truth (verified against upstream Go sources, main branch, and
+live binaries):
   - subfinder: -d/--all/-s/-es/--json/--silent/--no-color/--disable-update-check;
     JSONL line = {"host", "input", "source"}
   - httpx: stdin input, -p (nmap syntax), --json/-j, --silent, --no-color,
@@ -31,9 +34,20 @@ CLI ground truth (verified against upstream Go sources, main branch):
     -t, --timeout (Go duration, e.g. "10s"), --auto-wildcard;
     JSONL line = retryabledns.DNSData {"host","a":[],"aaaa":[],"mx":[],
     "txt":[],"ns":[],"soa":[...],"status_code",...}
+  - dalfox v3 (live-verified against 3.2.2 --help, 2026-09-07): subcommand
+    `scan`, JSON via `-f json` (NO --json flag in v3), `-S`, `--no-color`,
+    `--workers`, `--timeout` (per-request s), `--scan-timeout` (0 = off),
+    `--rate-limit`, `-X`, `-d`, `-H` (repeatable), `--cookies`, `-b`,
+    `-p` (repeatable, optional name:type), `-F`, `--only-discovery`;
+    JSON = {"findings": [{type V/R/A/I, severity, confidence, param,
+    location, payload, data (POC URL), detection_method, ...}],
+    "meta": {findings_count, total_requests, scan_duration_ms, ...}};
+    exit 0 = clean, exit 1 = vulnerable findings (NOT an error)
 
-Requires: subfinder, httpx, dnsx
+Requires: subfinder, httpx, dnsx, dalfox (v3)
 Install:  sudo apt install subfinder httpx dnsx -y
+          dalfox is NOT in Kali apt — install the .deb from
+          github.com/hahwul/dalfox/releases (e.g. dalfox-v3.2.2-linux-aarch64.deb)
 """
 
 from __future__ import annotations
@@ -723,6 +737,397 @@ async def dnsx_lookup(params: DnsxInput) -> str:
 
 
 # ===================================================================
+# 4. dalfox — XSS scanning (verified POCs: reflection + DOM)
+# ===================================================================
+
+#: dalfox v3 finding type legend (ground truth from live v3.2.2 output).
+_DALFOX_TYPE_LEGEND: dict[str, str] = {
+    "V": "vulnerable",
+    "R": "reflected",
+    "A": "ast-dom",
+    "I": "info",
+}
+
+_DALFOX_METHOD_RE = re.compile(r"^[A-Z]{2,10}$")
+_DALFOX_HEADER_NAME_RE = re.compile(r"^[A-Za-z0-9-]{1,64}$")
+_DALFOX_PARAM_RE = re.compile(
+    r"^[A-Za-z0-9_.\-\[\]]{1,64}(?::(?:query|body|json|cookie|header))?$"
+)
+
+
+def _validate_dalfox_url(v: str) -> str:
+    v = v.strip()
+    if not v.startswith(("http://", "https://")):
+        raise ValueError("url must start with http:// or https://")
+    # Query strings legitimately contain shell metachars (& ; = + % ...).
+    # The command runs as an argv list (no shell), so only the host part
+    # gets the shell-meta scrutiny plus a control-char check on the whole.
+    if any(c in v for c in "\r\n\x00"):
+        raise ValueError("url must not contain control characters")
+    _no_shell_meta(_httpx_entry_host(v))
+    return v
+
+
+def _split_header_pairs(v: str) -> list[str]:
+    """Split a comma-separated 'Name: value' list into dalfox -H values.
+
+    Values may contain colons (e.g. 'Referer: http://x/') — each pair is
+    split on its FIRST colon only.
+    """
+    out: list[str] = []
+    for part in v.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        name, sep, value = part.partition(":")
+        if not sep or not _DALFOX_HEADER_NAME_RE.match(name.strip()):
+            raise ValueError(
+                f"invalid header pair: {part!r} (expected 'Name: value')"
+            )
+        out.append(f"{name.strip()}:{value.strip()}")
+    return out
+
+
+class DalfoxInput(BaseModel):
+    """Input for dalfox v3 XSS scan."""
+
+    url: str = Field(
+        ...,
+        description=(
+            "Target URL to scan (http/https), e.g. "
+            "http://192.168.0.1:80/login.php?id=1"
+        ),
+        min_length=10,
+        max_length=2048,
+    )
+    params: str = Field(
+        default="",
+        description=(
+            "Optional parameter names to analyze, comma-separated; an "
+            "optional type suffix after ':' (query, body, json, cookie, "
+            "header), e.g. 'id,q:body'"
+        ),
+        max_length=512,
+    )
+    method: str = Field(
+        default="GET",
+        description="HTTP method override (GET, POST, PUT, DELETE, ...)",
+        max_length=10,
+    )
+    data: str = Field(
+        default="",
+        description="Optional HTTP request body (for POST etc.)",
+        max_length=4096,
+    )
+    headers: str = Field(
+        default="",
+        description=(
+            "Optional extra HTTP headers, comma-separated 'Name: value' "
+            "pairs, e.g. 'X-Api-Token: abc,Referer: http://x.example/'"
+        ),
+        max_length=1024,
+    )
+    cookies: str = Field(
+        default="",
+        description="Optional raw Cookie header value, e.g. 'session=abc123'",
+        max_length=2048,
+    )
+    blind: str = Field(
+        default="",
+        description="Optional blind-XSS callback URL (dalfox -b)",
+        max_length=512,
+    )
+    workers: int = Field(
+        default=50,
+        ge=1,
+        le=200,
+        description="Concurrent workers (dalfox default 50)",
+    )
+    timeout: int = Field(
+        default=10,
+        ge=1,
+        le=60,
+        description="Per-request timeout in seconds (network only)",
+    )
+    scan_timeout: int = Field(
+        default=120,
+        ge=0,
+        le=3600,
+        description=(
+            "Wall-clock cap in seconds for the payload-injection stage per "
+            "target (dalfox --scan-timeout; 0 = off)"
+        ),
+    )
+    rate_limit: int = Field(
+        default=0,
+        ge=0,
+        le=500,
+        description="Global request-rate cap in req/s across all workers (0 = unlimited)",
+    )
+    follow_redirects: bool = Field(
+        default=False,
+        description="Follow HTTP redirects (dalfox -F)",
+    )
+    discovery_only: bool = Field(
+        default=False,
+        description="Only discover parameters, do not send XSS payloads",
+    )
+    wall_timeout: int = Field(
+        default=300,
+        ge=30,
+        le=1800,
+        description="Overall wall-clock timeout in seconds (partial results kept)",
+    )
+    max_results: int = Field(
+        default=50,
+        ge=1,
+        le=500,
+        description="Max findings rendered in the report",
+    )
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        return _validate_dalfox_url(v)
+
+    @field_validator("params")
+    @classmethod
+    def validate_params(cls, v: str) -> str:
+        for token in _split_entries(v):
+            if not _DALFOX_PARAM_RE.match(token):
+                raise ValueError(f"invalid param spec: {token!r}")
+        return v
+
+    @field_validator("method")
+    @classmethod
+    def validate_method(cls, v: str) -> str:
+        v = v.strip().upper()
+        if not _DALFOX_METHOD_RE.match(v):
+            raise ValueError(f"invalid HTTP method: {v!r}")
+        return v
+
+    @field_validator("data")
+    @classmethod
+    def validate_data(cls, v: str) -> str:
+        if v:
+            # Bodies legitimately contain & ; = $ { } (form data, JSON).
+            # Execution is an argv list — no shell — so only control
+            # characters are rejected.
+            if any(c in v for c in "\r\n\x00"):
+                raise ValueError("data must not contain control characters")
+        return v
+
+    @field_validator("headers")
+    @classmethod
+    def validate_headers(cls, v: str) -> str:
+        if v:
+            _split_header_pairs(v)  # validates pair shape and header names
+            # Values may contain & ; = (query strings, cookie lists); the
+            # argv-list execution makes shell chars inert. Control chars
+            # are the real danger (HTTP header injection).
+            if any(c in v for c in "\r\n\x00"):
+                raise ValueError("headers must not contain control characters")
+        return v
+
+    @field_validator("cookies")
+    @classmethod
+    def validate_cookies(cls, v: str) -> str:
+        if v:
+            if any(c in v for c in "\r\n\x00"):
+                raise ValueError("cookies must not contain control characters")
+        return v
+
+    @field_validator("blind")
+    @classmethod
+    def validate_blind(cls, v: str) -> str:
+        if v and not v.startswith(("http://", "https://")):
+            raise ValueError("blind callback must be an http(s) URL")
+        return v
+
+
+def _dalfox_cmd(params: DalfoxInput) -> list[str]:
+    """Build the dalfox v3 command.
+
+    Ground truth (dalfox v3.2.2 --help, live-verified 2026-09-07):
+      - subcommand `scan`, positional TARGET
+      - JSON via `-f json` (there is NO --json flag in v3)
+      - `-S` silence, `--no-color`, `--workers`, `--timeout` (per-request s),
+        `--scan-timeout` (injection-stage cap, 0 = off), `--rate-limit`,
+        `-X` method, `-d` body, `-H` header (repeatable), `--cookies`,
+        `-b` blind callback, `-p` param (repeatable), `-F` follow redirects,
+        `--only-discovery`
+    """
+    cmd = ["dalfox", "scan"]
+    cmd.extend(["-f", "json", "-S", "--no-color"])
+    cmd.extend(["--workers", str(params.workers)])
+    cmd.extend(["--timeout", str(params.timeout)])
+    if params.scan_timeout > 0:
+        cmd.extend(["--scan-timeout", str(params.scan_timeout)])
+    if params.rate_limit > 0:
+        cmd.extend(["--rate-limit", str(params.rate_limit)])
+    if params.follow_redirects:
+        cmd.append("-F")
+    if params.discovery_only:
+        cmd.append("--only-discovery")
+    if params.method != "GET":
+        cmd.extend(["-X", params.method])
+    if params.data:
+        cmd.extend(["-d", params.data])
+    for h in _split_header_pairs(params.headers):
+        cmd.extend(["-H", h])
+    if params.cookies:
+        cmd.extend(["--cookies", params.cookies])
+    if params.blind:
+        cmd.extend(["-b", params.blind])
+    for p in _split_entries(params.params):
+        cmd.extend(["-p", p])
+    cmd.append(params.url)
+    return cmd
+
+
+def _parse_dalfox(stdout: str) -> tuple[list[dict], dict]:
+    """Extract (findings, meta) from dalfox `-f json` output.
+
+    Ground-truth shape (dalfox 3.2.2, live-verified 2026-09-07):
+        {"findings": [{type, severity, confidence, confidence_reason,
+                       param, location, payload, data, method,
+                       detection_method, cwe, ...}],
+         "meta": {dalfox_version, findings_count, scan_duration_ms,
+                  total_requests, target_summary, ...}}
+    Note: exit code is 0 when clean and 1 when vulnerable findings exist —
+    the presence of findings is authoritative, not the exit code.
+    """
+    try:
+        start = stdout.index("{")
+        doc = json.loads(stdout[start : stdout.rindex("}") + 1])
+    except (ValueError, json.JSONDecodeError):
+        return [], {}
+    if not isinstance(doc, dict):
+        return [], {}
+    findings = doc.get("findings")
+    meta = doc.get("meta")
+    return (
+        findings if isinstance(findings, list) else [],
+        meta if isinstance(meta, dict) else {},
+    )
+
+
+def _dalfox_report(params: DalfoxInput, findings: list[dict], meta: dict) -> str:
+    mode = (
+        "parameter discovery only"
+        if params.discovery_only
+        else "XSS scan (reflection + DOM)"
+    )
+    lines = [
+        "## 🦊 dalfox XSS 扫描",
+        f"**目标:** {params.url}",
+        f"**模式:** {mode}",
+        "",
+    ]
+    if meta:
+        lines.append(
+            f"**统计:** {meta.get('findings_count', 0)} findings · "
+            f"{meta.get('total_requests', '?')} requests · "
+            f"{meta.get('scan_duration_ms', 0)} ms"
+        )
+        lines.append("")
+    if not findings:
+        lines.append("✅ 未发现 XSS（扫描干净）。")
+        return "\n".join(lines)
+
+    vuln = [f for f in findings if f.get("type") == "V"]
+    if vuln:
+        lines.append(
+            f"🔴 **{len(vuln)} 个已验证可利用的 XSS** "
+            f"（dalfox 退出码 1 = 发现漏洞，非执行失败）"
+        )
+        lines.append("")
+
+    shown = findings[: params.max_results]
+    lines.extend(
+        [
+            "| 严重度 | 类型 | 参数 | 位置 | Payload |",
+            "|--------|------|------|------|---------|",
+        ]
+    )
+    for f in shown:
+        ftype = f.get("type", "?")
+        legend = _DALFOX_TYPE_LEGEND.get(ftype, f.get("type_description", ""))
+        payload = (f.get("payload") or "").replace("|", "\\|")[:120]
+        lines.append(
+            f"| {f.get('severity', '?')} | {ftype} ({legend}) "
+            f"| `{f.get('param', '?')}` | {f.get('location', '?')} "
+            f"| `{payload}` |"
+        )
+    if len(findings) > len(shown):
+        lines.append(
+            f"\n… 另有 {len(findings) - len(shown)} 条未显示 "
+            f"(max_results={params.max_results})"
+        )
+
+    poc = [f for f in shown if f.get("data")]
+    if poc:
+        lines.extend(["", "### 🧪 可复现 POC", ""])
+        for f in poc:
+            lines.append(
+                f"- `{f.get('data')}` "
+                f"(参数 `{f.get('param', '?')}`，{f.get('detection_method', '?')})"
+            )
+
+    other = [f for f in findings if f.get("type") != "V"]
+    if other:
+        lines.append(
+            f"\nℹ️ 另有 {len(other)} 条仅反射/信息类发现（未验证可利用）。"
+        )
+    lines.extend(
+        [
+            "",
+            "> 后续建议：浏览器手动验证 POC URL；同一主机可跑 `nuclei_scan` "
+            "查已知 CVE，`ffuf_fuzz` 补目录/参数面。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+async def dalfox_scan(params: DalfoxInput) -> str:
+    """Scan a web endpoint for XSS with dalfox v3 (verified, reproducible POCs).
+
+    dalfox runs parameter discovery, then injects its XSS payload catalog
+    with DOM verification. A 'V' finding means dalfox proved the payload
+    reached an executable position in the response — the report includes
+    the reproducible POC URL. 'R' = reflected but not verified,
+    'A' = static DOM-analysis candidate, 'I' = informational.
+
+    ACTIVE scanning: sends many crafted requests to the target. Only scan
+    applications you own or are authorized to test.
+
+    The attack step of the web pipeline: subfinder (hosts) → httpx (live
+    web) → dalfox (XSS) / nuclei (CVEs).
+
+    Requires: dalfox v3 (NOT in Kali apt; install the .deb from
+    github.com/hahwul/dalfox/releases)
+    """
+    executor = get_executor(timeout=params.wall_timeout)
+    cmd = _dalfox_cmd(params)
+    result = await executor.run(cmd, timeout=params.wall_timeout)
+
+    if not result.stdout:
+        diag = (result.stderr or "")[:500]
+        return (
+            "## 🦊 dalfox XSS 扫描\n"
+            f"**目标:** {params.url}\n\n"
+            f"❌ dalfox 执行失败（exit {result.returncode}）。\n\n"
+            f"```\n{diag}\n```\n\n"
+            "💡 若未安装（Kali apt 无此包）：从 github.com/hahwul/dalfox/"
+            "releases 下载 `dalfox-v3.*-linux-<arch>.deb` 后 "
+            "`sudo dpkg -i`"
+        )
+
+    findings, meta = _parse_dalfox(result.stdout)
+    return _dalfox_report(params, findings, meta)
+
+
+# ===================================================================
 # Registry
 # ===================================================================
 
@@ -730,4 +1135,5 @@ RECON_TOOLS: dict[str, tuple[callable, type[BaseModel]]] = {
     "subfinder_scan": (subfinder_scan, SubfinderInput),
     "httpx_probe": (httpx_probe, HttpxInput),
     "dnsx_lookup": (dnsx_lookup, DnsxInput),
+    "dalfox_scan": (dalfox_scan, DalfoxInput),
 }
