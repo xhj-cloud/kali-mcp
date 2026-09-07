@@ -310,12 +310,15 @@ class TestMasscanOutput:
     def test_summary_table_rendered(self, monkeypatch):
         import kali_mcp.tools as t
 
+        # Line format is ground truth from masscan 1.3.2 (live-verified
+        # 2026-09-07): "Discovered open port <port>/<proto> on <host>"
         sample = (
-            "Starting masscan 1.3.2 (https://bitbucket.org/robertdavidheath/masscan)\n"
-            "Starting 100.0/s scan of 192.168.1.0/24 ports:80,443\n"
-            "Discovered 192.168.1.10:80   Open\n"
-            "Discovered 192.168.1.10:443  Open\n"
-            "Discovered 192.168.1.20:80   Open\n"
+            "Starting masscan 1.3.2 (http://bit.ly/14GZzcT)\n"
+            "Initiating SYN Stealth Scan\n"
+            "Scanning 256 hosts [6 ports/host]\n"
+            "Discovered open port 80/tcp on 192.168.1.10\n"
+            "Discovered open port 443/tcp on 192.168.1.10\n"
+            "Discovered open port 53/udp on 192.168.1.20\n"
         )
 
         class _CapEx:
@@ -327,9 +330,9 @@ class TestMasscanOutput:
         monkeypatch.setattr(t, "get_executor", lambda timeout=None: _CapEx())
         out = _run(masscan_scan(MasscanInput(target="192.168.1.0/24")))
         assert "### 📋 开放端口汇总" in out
-        # 192.168.1.10 has two ports (80,443); 192.168.1.20 has one
+        # 192.168.1.10 has two ports (80,443); 192.168.1.20 has one (UDP)
         assert "| `192.168.1.10` | 80, 443 |" in out
-        assert "| `192.168.1.20` | 80 |" in out
+        assert "| `192.168.1.20` | 53 |" in out
         assert "nmap_scan" in out  # follow-up hint
 
     def test_no_open_ports_note(self, monkeypatch):
@@ -348,6 +351,48 @@ class TestMasscanOutput:
         out = _run(masscan_scan(MasscanInput(target="192.168.1.1")))
         assert "未发现开放端口" in out
         assert "### 📋 开放端口汇总" not in out
+
+    def test_stderr_progress_ticks_collapsed(self, monkeypatch):
+        """Live-verified format: masscan rewrites one progress line with \\r;
+        every tick must collapse to the final state in the report."""
+        import kali_mcp.tools as t
+
+        stderr = (
+            "Starting masscan 1.3.2 (http://bit.ly/14GZzcT) at 2026-09-07\n"
+            "Initiating SYN Stealth Scan\n"
+            "Scanning 256 hosts [6 ports/host]\n"
+            "rate:  0.50-kpps,  51.17% done, found=5"
+            "\rrate:  0.50-kpps,  76.11% done, found=17"
+            "\rrate:  0.00-kpps, 100.00% done, waiting 0-secs, found=27"
+        )
+
+        class _CapEx:
+            async def run(self, cmd, timeout=None, input_data=None):
+                return CommandResult(
+                    stdout="Discovered open port 80/tcp on 192.168.1.10\n",
+                    stderr=stderr,
+                    returncode=0,
+                    success=True,
+                )
+
+        monkeypatch.setattr(t, "get_executor", lambda timeout=None: _CapEx())
+        out = _run(masscan_scan(MasscanInput(target="192.168.1.0/24")))
+        # only the final tick survives, intermediate noise is gone
+        assert "found=27" in out
+        assert "found=17" not in out
+        assert "51.17%" not in out
+        assert "Scanning 256 hosts [6 ports/host]" in out
+
+    def test_clean_masscan_stderr_helper(self):
+        import kali_mcp.tools as t
+
+        assert t._clean_masscan_stderr("") == ""
+        # splitlines() splits on \r too: each tick is its own line
+        s = t._clean_masscan_stderr(
+            "Starting masscan\nrate:  50% done, found=5\r"
+            "rate: 100% done, found=27\r\nDone"
+        )
+        assert s == "Starting masscan\nrate: 100% done, found=27\nDone"
 
     def test_summary_helper_empty(self):
         assert _masscan_output_summary([]) == ""

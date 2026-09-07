@@ -1312,13 +1312,39 @@ class MasscanInput(BaseModel):
 
 
 def _parse_masscan_found(stdout: str) -> list[tuple[str, int]]:
-    """Extract (host, port) pairs from masscan 'Discovered' output lines."""
+    """Extract (host, port) pairs from masscan's human-readable output.
+
+    Ground-truth line format (masscan 1.3.2, live-verified against
+    192.168.0.0/24 on 2026-09-07):
+        Discovered open port 80/tcp on 192.168.0.68
+    """
     found: list[tuple[str, int]] = []
     for line in stdout.splitlines():
-        m = re.match(r"^Discovered\s+(\S+):(\d+)\s+Open", line)
+        m = re.match(r"^Discovered open port (\d+)/(\w+) on (\S+)", line)
         if m:
-            found.append((m.group(1), int(m.group(2))))
+            found.append((m.group(3), int(m.group(1))))
     return found
+
+
+def _clean_masscan_stderr(stderr: str) -> str:
+    """Collapse masscan's progress ticks to their final value.
+
+    masscan rewrites one progress line with \\r (e.g. 'rate: ... found=N');
+    captured raw, every tick lands in the report. Note str.splitlines()
+    splits on \\r as well, so each tick already arrives as its own line —
+    we keep only the last of any consecutive 'rate:' runs, leaving the
+    final '100.00% done ... found=N' state.
+    """
+    cleaned = []
+    for line in stderr.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("rate:") and cleaned and cleaned[-1].startswith("rate:"):
+            cleaned[-1] = line
+        else:
+            cleaned.append(line)
+    return "\n".join(cleaned)
 
 
 def _masscan_output_summary(found: list[tuple[str, int]]) -> str:
@@ -1380,6 +1406,8 @@ async def masscan_scan(params: MasscanInput) -> str:
 
     executor = get_executor(timeout=params.timeout)
     result = await executor.run(cmd, timeout=params.timeout)
+    if result.stderr:
+        result.stderr = _clean_masscan_stderr(result.stderr)
     out = _fmt("masscan Scan", params.target, " ".join(cmd), result)
 
     found = _parse_masscan_found(result.stdout)
