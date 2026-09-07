@@ -403,16 +403,17 @@ git pull
 sudo systemctl restart kali-mcp
 ```
 
-### sslstrip 装不上（命令不存在）
+### sslstrip 命令不存在
 
-**原因：** sslstrip 是 Python2 时代工具，新版 Kali 已从源移除。
+**原因：** 旧版 setup.sh 未安装 sslstrip（早期审计误判"Kali 已移除该包"，实际 `sslstrip 1.0+git20211125` 一直在 kali-rolling 仓库中）。
 
-**解决：** 无需安装。`sslstrip_run` 工具会自动回退到 bettercap 的 `http.proxy.sslstrip` 模块（功能等价且更强大）：
+**解决（2026-09-07 起）：** `setup.sh --tool-level full` 已包含 `sslstrip`，重装即可：
 
 ```bash
-# 只装 bettercap 即可
-sudo apt install -y bettercap
+sudo apt install -y sslstrip
 ```
+
+未安装时 `sslstrip_run` 也会自动回退到 bettercap 的 `http.proxy.sslstrip` 模块（功能等价且更强大）。
 
 ### Cherry Studio 突然连不上 MCP
 

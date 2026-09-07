@@ -107,6 +107,11 @@ BASE_PKGS=(
     openssl        # ssl_cert_check — s_client/x509 解析（Kali 预装，Debian 需显式安装）
     nftables       # firewall_rules — `nft list ruleset` 只读审计
     iptables       # firewall_rules — filter/nat 表规则查看
+    iputils-ping   # ping_host / ipv6_ping / ipv6_doctor（Kali 预装，Debian 需显式安装）
+    procps         # monitor 工具 — sysctl 读取内核参数
+    masscan        # masscan_scan — 大规模端口扫描
+    snmp           # snmp_topology（base 工具）— snmpwalk；原在 PENTEST_PKGS，层级错配已修
+    openssh-client # transfer 工具 — scp/ssh；vuls ssh shim 也依赖
     python3
     python3-pip
     python3-venv
@@ -128,7 +133,8 @@ PENTEST_PKGS=(
     # — see _web_binaries_setup() below (GitHub release binaries).
     dnsx            # dnsx_lookup — 批量 DNS 记录
     dnsrecon
-    snmp
+    # snmp moved to BASE_PKGS (2026-09-07): snmp_topology is a base-tier tool in
+    # tools.py, so its snmpwalk dependency must not be gated behind --tool-level.
     onesixtyone
     seclists
     exploitdb
@@ -364,6 +370,10 @@ ATTACK_PKGS=(
     reaver
     ettercap-text-only
     bettercap
+    hping3          # ddos_attack — SYN/UDP/ICMP flood 引擎
+    responder       # responder_run — LLMNR/NBT-NS/mDNS 投毒（🔴，需 root）
+    slowloris       # ddos_attack http/mixed — 慢速 HTTP 连接耗尽（Kali 仓库有包）
+    sslstrip        # sslstrip_run — HTTPS 降级（代码另有 bettercap 回退，装真包优先）
     sshpass         # system_patch_audit — password auth via PATH shim (never argv)
     python3-pymetasploit3  # msf_* tools — msfrpcd RPC client (DanMcInerney fork, Kali-maintained)
 )
