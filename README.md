@@ -563,6 +563,12 @@ sudo nmcli connection up "有线连接 1"
 | 86 | `msf_stop_job` | msfrpcd RPC | 🔴 | 停止指定 msf 作业 |
 | 87 | `msf_sessions` | msfrpcd RPC | 🔴 | 列出活跃 meterpreter/shell 会话 |
 | 88 | `msf_session_exec` | msfrpcd RPC | 🔴 | 在会话内执行 meterpreter/shell 命令 |
+| 89 | `msf_kill_session` | msfrpcd RPC (session.stop) | 🔴 | 结束活跃会话（int/uuid 均可，meterpreter/shell 通吃） |
+| 90 | `msf_job_info` | msfrpcd RPC (job.info) | 🟡 | 读取运行中 msf 作业的中间输出（job 表仅内存，完成即移除） |
+| 91 | `file_upload` | scp + sshpass -e | 🔴 | 本地文件上传目标（密码走 SSHPASS env 不落 argv） |
+| 92 | `file_download` | scp + sshpass -e | 🔴 | 目标文件下载到 Kali（拒绝覆盖已存在本地文件） |
+| 93 | `file_read` | 本地读取 | 🔴 | 读 Kali 文件（64KiB 上限，二进制只给 hexdump 头部） |
+| 94 | `file_delete` | 本地删除 | 🔴 | 删 Kali 普通文件（须 confirm=yes，拒目录/符号链接） |
 
 ---
 
