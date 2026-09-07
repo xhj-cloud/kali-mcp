@@ -250,6 +250,17 @@ if _attack_enabled:
         logger.info(
             "MSF attack tools: %d registered", len(MSF_ATTACK_TOOLS)
         )
+
+        # File transfer & local file tools (scp over sshpass + Kali read/delete)
+        from kali_mcp.transfer import TRANSFER_TOOLS
+
+        for _name, (_func, _model) in TRANSFER_TOOLS.items():
+            _register_tool_with_model(_name, _func, _model)
+            logger.info("Registered transfer tool: %s", _name)
+
+        logger.info(
+            "Transfer tools: %d registered", len(TRANSFER_TOOLS)
+        )
     except ImportError as e:
         logger.warning("Attack module import failed: %s", e)
 else:

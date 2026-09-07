@@ -29,6 +29,8 @@ from kali_mcp.msf import (
     MSF_PENTEST_TOOLS,
     MsfConnectionError,
     MsfConfigError,
+    MsfJobInfoInput,
+    MsfKillSessionInput,
     MsfRunExploitInput,
     MsfSearchInput,
     MsfSessionExecInput,
@@ -36,13 +38,18 @@ from kali_mcp.msf import (
     MsfStopJobInput,
     _coerce_option,
     _jobs_report,
+    _job_info,
+    _kill_session,
     _parse_options,
+    _payload_note,
     _run_exploit_report,
     _search_report,
     _sessions_report,
     _show_opts_report,
     _split_fullname,
+    msf_job_info,
     msf_jobs,
+    msf_kill_session,
     msf_search,
     msf_session_exec,
     msf_sessions,
@@ -109,6 +116,20 @@ class _FakeJobs:
     def stop(self, jobid):
         self.client.stopped.append(jobid)
 
+    def info(self, jobid):
+        # mimics the job.info RPC: for unknown jobs the live RPC RETURNS
+        # an error dict (does not raise) — verified 2026-09-07:
+        # {"error": true, "error_message": "Invalid Job", "error_code": 500}
+        if jobid not in self.client._job_info_data:
+            return {
+                "error": True,
+                "error_class": "Msf::RPC::Exception",
+                "error_string": "Msf::RPC::Exception",
+                "error_message": "Invalid Job",
+                "error_code": 500,
+            }
+        return dict(self.client._job_info_data[jobid])
+
 
 class _FakeSessions:
     def __init__(self, client):
@@ -127,15 +148,23 @@ class FakeClient:
         jobs=None,
         sessions=None,
         execute_result=None,
+        job_info=None,
     ):
         self.search_rows = search_rows or []
         self.modules_db = modules or {}
         self._jobs_data = jobs or {}
         self._sessions_data = sessions or {}
+        self._job_info_data = job_info or {}
         self.execute_result = execute_result or {"job_id": 1, "uuid": "abcd"}
         self.executed = []
         self.stopped = []
+        self.killed = []
         self.logged_out = 0
+
+    def call(self, method, params):
+        # raw RPC entry point (what MsfSession.stop() uses under the hood)
+        self.killed.append((method, list(params)))
+        return {"result": "success"}
 
     def _module_for(self, mname):
         if mname not in self.modules_db:
@@ -221,7 +250,11 @@ def _client(stub, **kw):
 
 class TestMsfGating:
     def test_pentest_set(self):
-        assert set(MSF_PENTEST_TOOLS) == {"msf_search", "msf_show_opts"}
+        assert set(MSF_PENTEST_TOOLS) == {
+            "msf_search",
+            "msf_show_opts",
+            "msf_job_info",
+        }
         for name, (func, model) in MSF_PENTEST_TOOLS.items():
             assert callable(func)
             assert model.__name__.endswith("Input")
@@ -232,6 +265,7 @@ class TestMsfGating:
             "msf_jobs",
             "msf_stop_job",
             "msf_sessions",
+            "msf_kill_session",
             "msf_session_exec",
         }
         for name, (func, model) in MSF_ATTACK_TOOLS.items():
@@ -514,11 +548,58 @@ class TestSessionsReport:
     def test_rows(self):
         out = _sessions_report(
             {6: {"type": "meterpreter", "tunnel": "127.0.0.1:4444 → 127.0.0.1:49999",
-                 "via": "exploit/multi/handler / payload/x", "username": "xhj",
+                 "via_exploit": "exploit/multi/handler",
+                 "via_payload": "payload/linux/aarch64/meterpreter_reverse_tcp",
+                 "payload_note": "linux/aarch64/meterpreter_reverse_tcp",
+                 "username": "xhj",
                  "platform": "linux", "arch": "aarch64", "uuid": "atv8tnyh"}}
         )
         assert "| 6 | meterpreter" in out
         assert "msf_session_exec" in out
+        assert "msf_kill_session" in out
+        # via_payload prefix stripped in the payload column
+        assert "payload/linux/" not in out
+
+    def test_rows_shell_no_platform(self):
+        out = _sessions_report(
+            {10: {"type": "shell", "tunnel": "192.168.0.225:44839 → 192.168.0.77:22",
+                  "via_exploit": "auxiliary/scanner/ssh/ssh_login",
+                  "via_payload": "", "payload_note": "",
+                  "username": "xhj", "platform": "", "arch": "", "uuid": "u1"}}
+        )
+        assert "auxiliary/scanner/ssh/ssh_login" in out
+        # empty payload renders as the dash placeholder
+        assert "| — |" in out
+
+
+class TestPayloadNote:
+    def test_strips_payload_prefix(self):
+        assert _payload_note(
+            "payload/linux/x64/meterpreter_reverse_tcp", "linux", "x64"
+        ) == "linux/x64/meterpreter_reverse_tcp"
+
+    def test_no_note_when_platform_matches(self):
+        note = _payload_note("payload/windows/x64/meterpreter/reverse_tcp",
+                             "windows", "x64")
+        assert "⚠️" not in note
+
+    def test_mismatch_warns(self):
+        note = _payload_note("payload/windows/meterpreter/reverse_tcp",
+                             "linux", "x64")
+        assert "windows/meterpreter/reverse_tcp" in note
+        assert "⚠️" in note
+        assert "linux/x64" in note
+
+    def test_multi_and_generic_payloads_no_note(self):
+        assert "⚠️" not in _payload_note("payload/multi/reverse_tcp", "linux", "x64")
+        assert "⚠️" not in _payload_note("payload/generic/shell_reverse_tcp", "windows", "x64")
+
+    def test_empty_via_payload(self):
+        assert _payload_note("", "linux", "x64") == ""
+
+    def test_shell_session_no_platform_skips_check(self):
+        # shell sessions carry no platform in session.list → no false alarm
+        assert "⚠️" not in _payload_note("payload/x", "", "")
 
 
 # ===================================================================
@@ -838,3 +919,125 @@ class TestMsfSessionExecTool:
         )
         assert "会话 99 不存在" in out
         assert "msf_sessions" in out
+
+
+# ===================================================================
+# msf_kill_session (bug 4: missing session-kill tool)
+# ===================================================================
+
+
+class TestKillSessionWorker:
+    def test_by_int_id(self, stub):
+        _client(stub, sessions={9: dict(SESSION_ROW)})
+        key, stype = _run(msf._rpc(_kill_session, "9"))
+        assert key == 9 and stype == "meterpreter"
+
+    def test_by_uuid(self, stub):
+        _client(stub, sessions={9: dict(SESSION_ROW)})
+        key, stype = _run(msf._rpc(_kill_session, "atv8tnyh"))
+        assert key == 9
+
+    def test_not_found(self, stub):
+        _client(stub, sessions={9: dict(SESSION_ROW)})
+        with pytest.raises(LookupError) as ei:
+            _run(msf._rpc(_kill_session, "99"))
+        assert "99" in str(ei.value)
+
+    def test_uses_session_stop_rpc(self, stub):
+        c = _client(stub, sessions={9: dict(SESSION_ROW)})
+        _run(msf._rpc(_kill_session, "9"))
+        assert c.killed == [("session.stop", [9])]
+
+
+class TestMsfKillSessionTool:
+    def test_happy_path(self, stub):
+        _client(stub, sessions={9: dict(SESSION_ROW)})
+        out = _run(msf_kill_session(MsfKillSessionInput(session_id="9")))
+        assert "✅ 已终止 session 9" in out
+        assert "meterpreter" in out
+        assert "msf_stop_job" in out  # cleanup hint
+
+    def test_not_found(self, stub):
+        _client(stub, sessions={9: dict(SESSION_ROW)})
+        out = _run(msf_kill_session(MsfKillSessionInput(session_id="99")))
+        assert "❌" in out and "msf_sessions" in out
+
+    def test_bad_session_id_rejected(self):
+        with pytest.raises(ValidationError):
+            MsfKillSessionInput(session_id="9; rm -rf /")
+
+
+# ===================================================================
+# msf_job_info (③-b: read completed job output)
+# ===================================================================
+
+JOB_INFO_SSH_LOGIN = {
+    "result": {
+        "job_id": 12,
+        "type": "auxiliary",
+        "command": "auxiliary/scanner/ssh/ssh_login",
+        "name": "SSH Login",
+        "result": "[*] 192.168.0.77:22  xhj:xhj200814 - Login Succeeded",
+    }
+}
+
+
+class TestJobInfoWorker:
+    def test_wraped_result_shape(self, stub):
+        _client(stub, job_info={12: JOB_INFO_SSH_LOGIN})
+        info = _run(msf._rpc(_job_info, 12))
+        assert info["job_id"] == 12
+        assert info["command"] == "auxiliary/scanner/ssh/ssh_login"
+        assert "Login Succeeded" in info["result"]
+
+    def test_unwrapped_shape(self, stub):
+        _client(stub, job_info={11: {
+            "job_id": 11, "type": "handler",
+            "command": "exploit/multi/handler", "name": "Handler",
+            "result": None,
+        }})
+        info = _run(msf._rpc(_job_info, 11))
+        assert info["command"] == "exploit/multi/handler"
+        assert info["result"] is None
+
+    def test_unknown_job_error_dict_raises(self, stub):
+        # live-verified: the RPC returns {"error": True, "error_message":
+        # "Invalid Job"} instead of raising
+        _client(stub)
+        with pytest.raises(LookupError) as ei:
+            _run(msf._rpc(_job_info, 99))
+        assert "Invalid Job" in str(ei.value)
+        assert "99" in str(ei.value)
+
+
+class TestMsfJobInfoTool:
+    def test_happy_path_str_result(self, stub):
+        _client(stub, job_info={12: JOB_INFO_SSH_LOGIN})
+        out = _run(msf_job_info(MsfJobInfoInput(job_id=12)))
+        assert "job 12" in out
+        assert "auxiliary/scanner/ssh/ssh_login" in out
+        assert "Login Succeeded" in out
+
+    def test_dict_result_json_dumped(self, stub):
+        _client(stub, job_info={13: {
+            "result": {"job_id": 13, "type": "exploit",
+                       "command": "exploit/multi/handler", "name": "Handler",
+                       "result": {"ok": True, "count": 2}},
+        }})
+        out = _run(msf_job_info(MsfJobInfoInput(job_id=13)))
+        assert '"count": 2' in out
+
+    def test_missing_result_field(self, stub):
+        _client(stub, job_info={11: {
+            "result": {"job_id": 11, "type": "handler",
+                       "command": "exploit/multi/handler", "name": "Handler"},
+        }})
+        out = _run(msf_job_info(MsfJobInfoInput(job_id=11)))
+        assert "无结果字段" in out
+
+    def test_unknown_job(self, stub):
+        _client(stub)
+        out = _run(msf_job_info(MsfJobInfoInput(job_id=99)))
+        assert "❌" in out and "99" in out
+        assert "不存在或记录已被清除" in out
+        assert "msf_jobs" in out

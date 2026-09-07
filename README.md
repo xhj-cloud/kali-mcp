@@ -1,11 +1,11 @@
 # 🔍 Kali MCP Server
 
-> 将 Kali Linux 变成你的 AI 网络助手 —— 74 个工具，从网络维护到 AD 横向，对话即操作。
+> 将 Kali Linux 变成你的 AI 网络助手 —— 94 个工具，从网络维护到 AD 横向，对话即操作。
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
 [![FastMCP](https://img.shields.io/badge/FastMCP-3.4+-green.svg)](https://gofastmcp.com)
 [![License](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightblue.svg)](LICENSE)
-[![Tools](https://img.shields.io/badge/Tools-88-orange.svg)]()
+[![Tools](https://img.shields.io/badge/Tools-94-orange.svg)]()
 
 ---
 
@@ -54,7 +54,7 @@
 | 抓包分析 | "抓取 eth0 上 100 个 HTTP 数据包" |
 | HTTP 测试 | "用 curl 请求 https://httpbin.org/ip" |
 
-### 🟡 渗透侦察（23 工具，`PENTEST_ENABLED=true`）
+### 🟡 渗透侦察（26 工具，`PENTEST_ENABLED=true`）
 
 | 场景 | 对话示例 |
 |------|----------|
@@ -76,8 +76,9 @@
 | IPv6 服务扫描 | "扫一下 2408::1 开放了哪些端口和服务" |
 | 补丁比对 | "对比 192.168.0.100 这台 Windows 的补丁，找出还没修复的漏洞" |
 | MSF 模块搜索 | "搜一下 Metasploit 里有哪些 SMB 相关的 exploit，看看 ms17_010 的选项" |
+| MSF 作业详情 | "读一下 job 12 的输出——ssh_login 到底成功没有" |
 
-### 🔴 主动攻击（28 工具，额外 `ATTACK_ENABLED=true`）
+### 🔴 主动攻击（38 工具，额外 `ATTACK_ENABLED=true`）
 
 | 场景 | 对话示例 |
 |------|----------|
@@ -101,6 +102,11 @@
 | ARP 踢人 | "把 192.168.0.97 踢下线" / "恢复它的网络" |
 | DHCP 泛洪 | "耗尽路由器 IP 池，新设备无法连 WiFi" |
 | MSF 利用/会话 | "用 multi/handler 接住 127.0.0.1:4444 的 payload，拿到 session 后跑 sysinfo" |
+| MSF 会话清理 | "结束 session 9，停掉 handler job 11" |
+| 文件上传 | "把 /tmp/mcp_only_test.elf 通过 scp 传到 192.168.0.77:/tmp/" |
+| 文件下载 | "把 192.168.0.77 的 /etc/hostname 拉回 Kali" |
+| 文件读取 | "读一下 Kali 上 /tmp/payload.elf 的内容（前 64KB）" |
+| 文件删除 | "删掉 Kali 上的 /tmp/mcp_only_test.elf 完成清理" |
 
 ---
 
@@ -112,8 +118,8 @@
 │  Claude Desktop   │                              │  (FastMCP 3.x)           │
 └──────────────────┘                              ├──────────────────────────┤
                                                    │ 🟢 30 网络维护 (默认)    │
-                                                   │ 🟡 23 渗透侦察 (可开关)  │
-                                                   │ 🔴 28 主动攻击 (可开关)   │
+                                                   │ 🟡 26 渗透侦察 (可开关)  │
+                                                   │ 🔴 38 主动攻击 (可开关)   │
                                                    └──────────────────────────┘
 ```
 
@@ -156,7 +162,7 @@ EOF
 默认只加载 🟢 网络维护工具（30 个）。要使用渗透和攻击工具，**必须显式开启开关**：
 
 ```bash
-# 开启 🟡 渗透侦察模块（+25 工具，漏洞扫描/Web 侦察管线/爆破/SNMP/证书检查/IPv6 侦察/AD 枚举/MSF 侦察等）
+# 开启 🟡 渗透侦察模块（+26 工具，漏洞扫描/Web 侦察管线/爆破/SNMP/证书检查/IPv6 侦察/AD 枚举/MSF 侦察等）
 sed -i 's/^PENTEST_ENABLED=.*/PENTEST_ENABLED=true/' .env
 
 # 开启 🔴 主动攻击模块（+33 工具，SQL注入/中间人/WiFi破解/补丁比对/AD 攻击/MSF 利用等）
@@ -179,8 +185,8 @@ grep -E "PENTEST_ENABLED|ATTACK_ENABLED" .env
 | PENTEST | ATTACK | 工具数 |
 |:---:|:---:|:---:|
 | false | false | 30（仅网络维护） |
-| true | false | 55（+渗透侦察 + MSF 侦察） |
-| true | true | 88（+主动攻击 + MSF 桥） |
+| true | false | 56（+渗透侦察 + MSF 侦察） |
+| true | true | 94（+主动攻击 + MSF 桥 + 文件传输） |
 
 ### 4. 启动
 
@@ -339,9 +345,9 @@ curl http://<Kali-IP>:8000/mcp
 
 `snmp-check` 不在 Kali apt 仓库。已改用 `snmpwalk`（`apt install snmp`）替代，无需额外安装。
 
-### 工具数量不对（30 个 vs 88 个）
+### 工具数量不对（30 个 vs 94 个）
 
-**现象：** 两台虚拟机工具数不同，一台 30 个，一台 88 个。
+**现象：** 两台虚拟机工具数不同，一台 30 个，一台 94 个。
 
 **原因：** `.env` 中 `PENTEST_ENABLED` 和 `ATTACK_ENABLED` 为 `false`，渗透和攻击工具未加载。
 
@@ -350,8 +356,8 @@ curl http://<Kali-IP>:8000/mcp
 | 配置 | 工具数 |
 |------|------|
 | 两个都 `false` | 30（16 网络 + 4 监视 + 10 IPv6） |
-| `PENTEST=true` | 55（+8 渗透 + 6 挖洞 + 4 Web 侦察 + 2 IPv6 渗透 + 3 AD 枚举 + 2 MSF 侦察） |
-| 两个都 `true` | 88（+24 攻击 + 4 AD 攻击 + 5 MSF 攻击） |
+| `PENTEST=true` | 56（+8 渗透 + 6 挖洞 + 4 Web 侦察 + 2 IPv6 渗透 + 3 AD 枚举 + 3 MSF 侦察） |
+| 两个都 `true` | 94（+24 攻击 + 4 AD 攻击 + 6 MSF 攻击 + 4 文件传输） |
 
 **解决：**
 
@@ -595,11 +601,49 @@ ATTACK_ENABLED=true  ──→ 🔴 攻击工具    (需二次开关)
 | 措施 | 说明 |
 |------|------|
 | 零命令注入 | `create_subprocess_exec` 列表传参，永久禁用 shell=True |
-| Pydantic 校验 | 所有输入经模型校验，拦截 shell 元字符 |
+| Pydantic 校验 | 按上下文分级：shell 上下文拦截全部 shell 元字符；列表传参的负载（curl body、sqlmap --data 等）只拦截 NUL，`&<>;$()` 作为合法 payload 放行 |
 | 三级权限 | 维护→渗透→攻击，逐级开启，默认仅维护 |
 | 调用警告 | 攻击工具强制输出 `🔴🔴🔴 主动攻击警告` |
 | 危险过滤 | 禁止 nmap --script 写入、tcpdump 写文件等 |
 | 超时保护 | 每个命令独立超时 |
+
+---
+
+## 修复记录
+
+### 2026-09-07 — 纯 MCP 攻击链闭环（4 个 bug 修复 + 3 项能力补全）
+
+**背景：** 用纯 MCP 工具（不碰 Kali 的 ssh）对 192.168.0.77 做完整攻击链验证时，暴露了 4 个产品 bug 和 3 个能力缺口。全部修复/补齐，701 个测试全绿。
+
+**Bug 修复：**
+
+1. **`http_request` 过度拦截 payload 元字符**（tools.py）
+   命令是列表传参、不经过 shell，但校验器仍拦截 `& < > ; | $ ()` 等——多字段表单 POST（`a=1&b=2`）在 MCP 里根本发不出去。
+   修复：新增 `_no_nul` / `_no_nul_or_newline` 分级校验——`data` 只拦 NUL（`&` 等放行），`url`/`headers` 拦 NUL+换行并保持 http(s) 前缀（防 curl 选项注入）；`_no_shell_meta` 保留给真正的 shell 上下文。
+2. **`http_request` 默认跟随重定向**（tools.py）
+   默认 `follow_redirects=true` 时，遇到方法保持的 307 循环（Flask 表单校验失败跳回）会撞 curl exit 47（TOO_MANY_REDIRECTS）。
+   修复：默认改为 `false`——探测应看原始响应，需要最终页面时显式传 `true`。
+3. **`msf_sessions` payload 标签误导**（msf.py）
+   msfrpcd 的 `via_payload` 取自 handler 模块 datastore 的 PAYLOAD 选项（`Session#set_from_exploit`），是 **handler 配置值**而非实际投递的 payload——multi/handler 配置 A 仍可能接住 B，导致 linux/x64 会话显示 windows 的 payload。
+   修复：payload 列剥离 `payload/` 前缀；当 payload 的平台 token 与会话实际 platform 矛盾时追加 `⚠️ 与平台 x/y 不符（handler 配置值）` 标注；来源列拆分为 `来源 exploit` / `来源 payload` 两列。
+   活体复测（2026-09-07）：handler 显式配置 `Payload=linux/x64/meterpreter_reverse_tcp` 时，linux/x64 meterpreter 会话的 payload 列仍显示 `windows/meterpreter/reverse_tcp`——该字段完全不可信，警告标注按设计触发。
+4. **缺少 `msf_kill_session` 工具**（msf.py）
+   攻击链收尾只能靠 msfrpcd 重启或 msfconsole 手动 kill。
+   修复：新增 `msf_kill_session(session_id)`（数字 ID 或 uuid 均可），走 `session.stop` RPC，meterpreter/shell 通吃，报告附清理检查单。
+
+**能力补全：**
+
+1. **文件传输/读取/删除**（新模块 transfer.py，+4 工具，ATTACK_ENABLED 下启用）
+   - `file_upload` / `file_download`：scp over SSH（`sshpass -e` + SSHPASS 环境变量传密码，密码不落命令行）——补上 meterpreter payload 投递/取证回传的缺口
+   - `file_read`：读 Kali 本地文件（默认 64KiB 上限、二进制只给 hexdump 头部）
+   - `file_delete`：删 Kali 本地普通文件（须 `confirm="yes"`，拒目录/符号链接）——payload 清理收尾
+2. **`sqlmap_scan` 增加 `data` 参数**（pentest.py）
+   原来只能测 URL 查询参数，POST-only 表单是死区。新增 `data` 透传 `--data=`（`&` 等元字符作为表单本体放行，只拦 NUL）。
+3. **`msf_job_info` 工具**（msf.py，PENTEST_ENABLED 下启用）
+   读 `job.info` RPC，字符串/JSON 结果都渲染，超 4000 字符截断。
+   活体实测（2026-09-07，MSF 6.5.0）：msfrpcd 的 job 表**只在内存中**，且 job **完成即被移除**（连运行中的 handler 在 ExitOnSession 退出后也查不到）——`job.info` 实际只能读**仍在运行**的 job 的中间输出；不存在的 job 返回 error dict（`Invalid Job`），工具会给出明确报错而非 "?" 报告。
+
+**验证：** 本地 701 个测试全绿（636 → 701）；部署后纯 MCP 全链路复测（含 meterpreter：msfvenom 生成 → file_upload 投递 → handler → ssh_login 会话执行 payload → sysinfo → 全量清理）。
 
 ---
 

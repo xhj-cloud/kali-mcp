@@ -36,9 +36,31 @@ _SHELL_META = set(";|&`$(){}<>\n\r")
 
 
 def _no_shell_meta(v: str) -> str:
-    """Reject strings containing shell metacharacters."""
+    """Reject strings containing shell metacharacters.
+
+    Only for inputs that end up in a shell-interpreted context. For
+    list-form command arguments (no shell involved) use the lighter
+    _no_nul / _no_nul_or_newline helpers below — blocking e.g. '&'
+    there crippled legitimate web payloads (form bodies, XSS probes).
+    """
     if any(c in v for c in _SHELL_META):
         raise ValueError("Input contains forbidden shell metacharacters")
+    return v
+
+
+def _no_nul(v: str) -> str:
+    """Reject NUL bytes (the only char that is dangerous in a list-form
+    subprocess argument). Everything else — '&', '<', '>', ';', '|',
+    '$', backticks — is inert because no shell interprets it."""
+    if "\x00" in v:
+        raise ValueError("Input contains a NUL byte")
+    return v
+
+
+def _no_nul_or_newline(v: str) -> str:
+    """Reject NUL and newlines (single-line inputs: URLs, header values)."""
+    if "\x00" in v or "\n" in v or "\r" in v:
+        raise ValueError("Input must be a single line (no NUL/newline)")
     return v
 
 
@@ -444,17 +466,31 @@ class CurlInput(BaseModel):
     )
     data: str = Field(
         default="",
-        description="Request body data (for POST/PUT/PATCH)",
+        description=(
+            "Request body data (for POST/PUT/PATCH). Form bodies with '&', "
+            "URL-encoded payloads ('%27', '%3Cscript%3E'), JSON — all fine; "
+            "only NUL bytes are rejected (curl is invoked without a shell)."
+        ),
         max_length=8192,
     )
     timeout: int = Field(default=30, description="Request timeout in seconds", ge=1, le=120)
-    follow_redirects: bool = Field(default=True, description="Follow HTTP redirects")
+    follow_redirects: bool = Field(
+        default=False,
+        description=(
+            "Follow HTTP redirects. Default FALSE: probes should inspect the "
+            "raw response (a method-preserving 307 loop with -L hangs curl). "
+            "Set true only for browsing/final-page fetches."
+        ),
+    )
     insecure: bool = Field(default=False, description="Allow insecure SSL connections")
 
     @field_validator("url")
     @classmethod
     def validate_url(cls, v: str) -> str:
-        _no_shell_meta(v)
+        # The URL is passed as a standalone list-form argument after all
+        # curl flags; the http(s) prefix check (below) already blocks curl
+        # option injection, so shell-meta filtering would only hurt.
+        _no_nul_or_newline(v)
         if not v.startswith(("http://", "https://")):
             raise ValueError("URL must start with http:// or https://")
         return v
@@ -463,14 +499,17 @@ class CurlInput(BaseModel):
     @classmethod
     def validate_headers(cls, v: str) -> str:
         if v:
-            _no_shell_meta(v)
+            # Header values are split per-line by curl; keep them single-line.
+            _no_nul_or_newline(v)
         return v
 
     @field_validator("data")
     @classmethod
     def validate_data(cls, v: str) -> str:
         if v:
-            _no_shell_meta(v)
+            # Body data is a single list-form argument — '&', '<', '>', ';',
+            # '|', '$', backticks are all legitimate payload content here.
+            _no_nul(v)
         return v
 
 
@@ -874,9 +913,14 @@ async def http_request(params: CurlInput) -> str:
 
     Performs HTTP requests to test web services, APIs, and check
     connectivity. Supports all standard methods, custom headers,
-    and request bodies.
+    and request bodies (multi-field form POSTs with '&' included —
+    curl is invoked without a shell, so payload metacharacters are safe).
 
-    Equivalent to: curl -X {method} {url} -H '...' -d '...'
+    Redirects are NOT followed by default (raw status/headers are what
+    probes need; method-preserving 307 loops hang curl -L). Set
+    follow_redirects=true for final-page fetches.
+
+    Equivalent to: curl -s -X {method} [--connect-timeout T] -H '...' -d '...' {url}
 
     Requires: curl (pre-installed on Kali)
     """

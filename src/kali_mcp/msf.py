@@ -263,6 +263,66 @@ def _stop_job(client, job_id: int) -> None:
     client.jobs.stop(job_id)
 
 
+def _kill_session(client, sid: str) -> tuple:
+    """Kill a session by numeric ID or uuid. Returns (resolved_id, type).
+
+    Calls the raw `session.stop` RPC directly (what MsfSession.stop() does
+    under the hood) — works for meterpreter AND shell sessions. Bypasses
+    SessionManager.session() for the same reason _session_exec does.
+    """
+    sl = client.sessions.list or {}
+    key = None
+    if sid.isdigit():
+        n = int(sid)
+        if n in sl:
+            key = n
+    if key is None:
+        for k, v in sl.items():
+            if isinstance(v, dict) and v.get("uuid") == sid:
+                key = k
+                break
+    if key is None:
+        known = ", ".join(
+            f"{k}({v.get('uuid', '?') if isinstance(v, dict) else '?'})"
+            for k, v in sl.items()
+        ) or "（无）"
+        raise LookupError(f"会话 {sid} 不存在——当前会话: {known}")
+    data = sl[key]
+    stype = data.get("type", "?") if isinstance(data, dict) else "?"
+    client.call("session.stop", [key])
+    return key, stype
+
+
+def _job_info(client, job_id: int) -> dict:
+    """Fetch the msfrpcd job record (job.info RPC).
+
+    Completed auxiliary/exploit jobs keep their module result in the job
+    record even after they leave the running list — this is how you read
+    e.g. an ssh_login success line after the job finished.
+
+    NOTE: the job table is IN-MEMORY — an msfrpcd restart wipes it. For an
+    unknown id the RPC returns an error dict (live-verified 2026-09-07:
+    {"error": true, "error_message": "Invalid Job", "error_code": 500}).
+    """
+    raw = client.jobs.info(job_id) or {}
+    if isinstance(raw, dict) and raw.get("error"):
+        msg = raw.get("error_message") or raw.get("error_string") or "未知错误"
+        raise LookupError(
+            f"job {job_id} 不存在或记录已被清除（msfrpcd 的 job 表只在内存中，"
+            f"服务重启即丢失）: {msg}"
+        )
+    inner = raw.get("result") if isinstance(raw, dict) else None
+    if not isinstance(inner, dict):
+        inner = raw if isinstance(raw, dict) else {}
+    return {
+        "job_id": inner.get("job_id", job_id),
+        "type": inner.get("type", "?"),
+        "name": inner.get("name", "?"),
+        "command": inner.get("command", "?"),
+        "result": inner.get("result"),
+    }
+
+
 def _sessions(client) -> dict:
     sl = client.sessions.list or {}
     out = {}
@@ -275,7 +335,13 @@ def _sessions(client) -> dict:
             out[key] = {
                 "type": v.get("type", "?"),
                 "tunnel": f"{v.get('tunnel_local', '?')} → {v.get('tunnel_peer', '?')}",
-                "via": f"{v.get('via_exploit', '?')} / {v.get('via_payload', '?')}",
+                "via_exploit": str(v.get("via_exploit") or ""),
+                "via_payload": str(v.get("via_payload") or ""),
+                "payload_note": _payload_note(
+                    str(v.get("via_payload") or ""),
+                    str(v.get("platform") or ""),
+                    str(v.get("arch") or ""),
+                ),
                 "info": v.get("info", ""),
                 "username": v.get("username", ""),
                 "platform": v.get("platform", ""),
@@ -283,6 +349,28 @@ def _sessions(client) -> dict:
                 "uuid": v.get("uuid", ""),
             }
     return out
+
+
+def _payload_note(via_payload: str, platform: str, arch: str) -> str:
+    """Display form of via_payload + a mismatch warning when the payload's
+    platform token contradicts the session's actual platform.
+
+    via_payload is the handler module's *configured* PAYLOAD option
+    (msfrpcd Session#set_from_exploit), not necessarily what was actually
+    delivered — a multi/handler configured with one payload can still
+    accept another, so a linux session may report a windows payload.
+    """
+    if not via_payload:
+        return ""
+    disp = via_payload
+    if disp.startswith("payload/"):
+        disp = disp[len("payload/") :]
+    note = ""
+    if platform and disp:
+        tok = disp.split("/", 1)[0]
+        if tok not in (platform, "multi") and tok != "generic":
+            note = f"⚠️ 与平台 {platform}/{arch or '?'} 不符（handler 配置值）"
+    return f"{disp} {note}".strip()
 
 
 def _poll_read(read_fn, seconds: float, interval: float = 0.5) -> str:
@@ -570,17 +658,19 @@ def _sessions_report(sessions: dict) -> str:
             "（handler 类模块会一直等待，直到超时或收到连接）。"
         )
         return "\n".join(lines)
-    lines.append("| ID | 类型 | 隧道 | 用户 | 平台/架构 | 来源 |")
-    lines.append("|----|------|------|------|-----------|------|")
+    lines.append("| ID | 类型 | 隧道 | 用户 | 平台/架构 | 来源 exploit | 来源 payload |")
+    lines.append("|----|------|------|------|-----------|--------------|--------------|")
     for sid, s in sorted(sessions.items(), key=lambda kv: kv[0]):
+        via_exploit = s.get("via_exploit") or "?"
+        payload = s.get("payload_note") or (s.get("via_payload") or "—")
         lines.append(
             f"| {sid} | {s['type']} | {s['tunnel']} | {s['username']} "
-            f"| {s['platform']}/{s['arch']} | {s['via']} |"
+            f"| {s['platform']}/{s['arch']} | {via_exploit} | {payload} |"
         )
     lines.append("")
     lines.append(
         "> 后续步骤：`msf_session_exec(session_id, command)` 在会话内执行命令"
-        "（如 `sysinfo`、`getuid`、`shell -i`）。"
+        "（如 `sysinfo`、`getuid`、`shell -i`）；结束会话用 `msf_kill_session(session_id)`。"
     )
     return "\n".join(lines)
 
@@ -738,6 +828,33 @@ class MsfSessionExecInput(BaseModel):
         if "\n" in v or "\r" in v:
             raise ValueError("command must be a single line")
         return v.strip()
+
+
+class MsfKillSessionInput(BaseModel):
+    """Input for msf_kill_session."""
+
+    session_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        description="Session ID (numeric, from msf_sessions) or its uuid",
+    )
+
+    @field_validator("session_id")
+    @classmethod
+    def validate_session_id(cls, v: str) -> str:
+        v = v.strip()
+        if not (v.isdigit() or _UUID_RE.match(v)):
+            raise ValueError(
+                f"Invalid session id: {v!r} (use the numeric ID or uuid from msf_sessions)"
+            )
+        return v
+
+
+class MsfJobInfoInput(BaseModel):
+    """Input for msf_job_info."""
+
+    job_id: int = Field(..., ge=0, description="Job ID from msf_jobs / msf_run_exploit")
 
 
 # ---------------------------------------------------------------------------
@@ -923,6 +1040,77 @@ async def msf_session_exec(params: MsfSessionExecInput) -> str:
     return "\n".join(lines)
 
 
+async def msf_kill_session(params: MsfKillSessionInput) -> str:
+    """Kill a live meterpreter/shell session (cleanup after post-exploitation).
+
+    Calls the msfrpcd `session.stop` RPC — the session is closed on the
+    target side (the reverse connection drops). Use it as part of full
+    cleanup together with `msf_stop_job` (handlers) so no foothold lingers.
+    """
+    try:
+        key, stype = await _rpc(_kill_session, params.session_id, timeout=30)
+    except (MsfConfigError, MsfConnectionError) as e:
+        return _error_report("结束会话", e)
+    except LookupError as e:
+        return (
+            f"## 🎯 Metasploit 结束会话\n\n❌ {e}\n\n"
+            "💡 用 `msf_sessions` 查看当前会话及其 ID/uuid。"
+        )
+    except Exception as e:
+        return (
+            f"## 🎯 Metasploit 结束会话\n\n"
+            f"❌ 结束 session {params.session_id} 失败: {type(e).__name__}: {e}"
+        )
+    return (
+        f"## 🎯 Metasploit 结束会话\n\n"
+        f"✅ 已终止 session {key}（{stype}）。\n\n"
+        "> 用 `msf_sessions` 确认它已消失；handler 还在跑的话用 `msf_stop_job` 停掉。"
+    )
+
+
+async def msf_job_info(params: MsfJobInfoInput) -> str:
+    """Read a msf job's record — including completed jobs' module output.
+
+    The running-job list (msf_jobs) drops finished jobs, but their result
+    (e.g. an ssh_login success line, a scan report) stays in the job
+    record. This tool fetches it, so you can read scanner/exploit output
+    after the job completed.
+    """
+    try:
+        info = await _rpc(_job_info, params.job_id, timeout=30)
+    except (MsfConfigError, MsfConnectionError) as e:
+        return _error_report("作业详情", e)
+    except LookupError as e:
+        return (
+            f"## 🎯 Metasploit 作业详情\n\n❌ {e}\n\n"
+            "💡 用 `msf_jobs` 查看当前运行中的 job ID。"
+        )
+    except Exception as e:
+        return (
+            f"## 🎯 Metasploit 作业详情\n\n"
+            f"❌ 读取 job {params.job_id} 失败: {type(e).__name__}: {e}"
+        )
+    result = info.get("result")
+    if result is None:
+        result_txt = "（无结果字段——部分模块只向 msfrpcd 日志输出，作业记录里没有正文）"
+    elif isinstance(result, str):
+        result_txt = result if len(result) <= 4000 else result[:4000] + f"\n…（已截断，共 {len(result)} 字符）"
+    else:
+        import json as _json
+
+        dump = _json.dumps(result, ensure_ascii=False, default=str)
+        result_txt = dump if len(dump) <= 4000 else dump[:4000] + f"\n…（已截断，共 {len(dump)} 字符）"
+    lines = [
+        f"## 🎯 Metasploit 作业详情 — job {info['job_id']}",
+        f"**类型:** {info['type']}  |  **模块:** `{info['command']}`  |  **名称:** {info['name']}",
+        "",
+        "```",
+        result_txt.strip(),
+        "```",
+    ]
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
@@ -930,6 +1118,7 @@ async def msf_session_exec(params: MsfSessionExecInput) -> str:
 MSF_PENTEST_TOOLS: dict[str, tuple[callable, type[BaseModel]]] = {
     "msf_search": (msf_search, MsfSearchInput),
     "msf_show_opts": (msf_show_opts, MsfShowOptsInput),
+    "msf_job_info": (msf_job_info, MsfJobInfoInput),
 }
 
 MSF_ATTACK_TOOLS: dict[str, tuple[callable, type[BaseModel]]] = {
@@ -937,5 +1126,6 @@ MSF_ATTACK_TOOLS: dict[str, tuple[callable, type[BaseModel]]] = {
     "msf_jobs": (msf_jobs, None),
     "msf_stop_job": (msf_stop_job, MsfStopJobInput),
     "msf_sessions": (msf_sessions, None),
+    "msf_kill_session": (msf_kill_session, MsfKillSessionInput),
     "msf_session_exec": (msf_session_exec, MsfSessionExecInput),
 }
