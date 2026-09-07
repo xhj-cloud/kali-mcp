@@ -24,7 +24,8 @@ CLI ground truth (verified against upstream Go sources, main branch):
     -t, --timeout (int seconds), -rl, -fr, --http2, --tech-detect;
     JSONL line = {"url","input","title","status_code","content_length",
     "content_type","webserver","tech":[...],"failed",...}
-  - dnsx: -d (comma list, no wordlist → plain resolution), per-type flags
+  - dnsx: -l (comma list → plain resolution; -d is brute-force mode and
+    requires -w in released 1.3.x), per-type flags
     --a/--aaaa/--cname/--ns/--txt/--srv/--ptr/--mx/--soa/--caa/--any, -all,
     --json/-j, --or (omit raw), --silent, --no-color, --disable-update-check,
     -t, --timeout (Go duration, e.g. "10s"), --auto-wildcard;
@@ -601,7 +602,12 @@ def _dnsx_cmd(params: DnsxInput) -> list[str]:
     domains = _split_entries(params.domains)
     cmd = [
         "dnsx",
-        "-d", ",".join(domains),
+        # -l (list) = plain resolution of the given hosts.
+        # -d (domain) is BRUTE-FORCE mode and REQUIRES a wordlist in the
+        # released 1.3.x builds ("[FTL] missing wordlist(w) flag required
+        # with domain(d) input") — only the main-branch build falls back
+        # to resolution, so -d must not be used here.
+        "-l", ",".join(domains),
         "--json",
         "--or",  # omit raw DNS response from JSONL (keep payload small)
         "--silent",

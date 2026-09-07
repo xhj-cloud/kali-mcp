@@ -10,11 +10,14 @@
 >   待办：回内网后 Kali 上 live 验证 + 部署（masscan 需 `apt install masscan`）。
 > - 2026-09-07 ✅ P0-1 Web 侦察管线完成（新模块 `recon.py`：subfinder_scan / httpx_probe / dnsx_lookup，
 >   🟡 门控，70 个新测试，451 全绿）。CLI 以 projectdiscovery **main 分支 Go 源码**为 ground truth，
->   抓出 4 个文档级坑：① subfinder JSONL 用 `host` 键（旧文档写 `domain`，解析双兼容）；② httpx 标题/技术栈
+>   抓出 5 个文档级坑：① subfinder JSONL 用 `host` 键（旧文档写 `domain`，解析双兼容）；② httpx 标题/技术栈
 >   字段只有在传 `--title`/`--tech-detect` 时才出现在 JSON 里；③ dnsx `--timeout` 是 Go duration（传 `"10s"`）；
->   ④ dnsx 的 `--chaos`/`--safe` 已在 main 移除（代码与测试均断言其不存在）。httpx 目标走 **stdin**（无 -u/-l 时
->   `fileutil.HasStdin()` 生效），避免长列表 argv 溢出。
->   待办：回内网后 Kali 上 `apt install subfinder httpx dnsx` + live 验证（subfinder 需公网 OSINT 源可达）。
+>   ④ dnsx 的 `--chaos`/`--safe` 已在 main 移除（代码与测试均断言其不存在）；⑤ **dnsx `-d` 是爆破模式**——
+>   发布版 1.3.x 强制要求配 `-w` 词表（`[FTL] missing wordlist(w)`，live 实测抓到），普通解析必须用 `-l`。
+>   httpx 目标走 **stdin**（无 -u/-l 时 `fileutil.HasStdin()` 生效），避免长列表 argv 溢出。
+>   2026-09-07 ✅ 已部署 Kali 并 live 验证：subfinder/dnsx 走 apt（2.16.0/1.3.0），httpx 不在 Kali apt、
+>   从 GitHub release v1.11.0 装 arm64 二进制到 /usr/local/bin（与 curl 系 /usr/bin/httpx 共存，PATH 优先）。
+>   服务 73 工具生效，httpx 探测本机 MCP 端口成功（uvicorn 指纹），dnsx 经 `-l` 修复后待复测。
 
 ## 一、缺口盘点（对照 2026 竞品）
 

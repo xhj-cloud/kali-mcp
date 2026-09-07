@@ -547,7 +547,10 @@ class TestDnsxCmd:
         )
         cmd = captured["cmd"]
         assert cmd[0] == "dnsx"
-        assert cmd[cmd.index("-d") + 1] == "example.com,sub.example.com"
+        # -l (list) = plain resolution; -d is brute-force mode and REQUIRES
+        # a wordlist in released dnsx 1.3.x builds
+        assert cmd[cmd.index("-l") + 1] == "example.com,sub.example.com"
+        assert "-d" not in cmd
         assert "--json" in cmd
         assert "--or" in cmd  # omit raw response from JSONL
         assert "--silent" in cmd
