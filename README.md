@@ -1,13 +1,18 @@
 # 🔍 Kali MCP Server
 
 > 将 Kali Linux 变成你的 AI 网络助手 —— 94 个工具，从网络维护到 AD 横向，对话即操作。
+> Turn Kali Linux into your AI network assistant — 94 tools, from network maintenance to AD lateral movement. Talk is the command.
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
 [![FastMCP](https://img.shields.io/badge/FastMCP-3.4+-green.svg)](https://gofastmcp.com)
 [![License](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightblue.svg)](LICENSE)
 [![Tools](https://img.shields.io/badge/Tools-94-orange.svg)]()
 
+**[English](#english)** | **[简体中文](#简体中文)**
+
 ---
+
+## 简体中文
 
 ## ⚠️ 重要警告
 
@@ -117,10 +122,10 @@
 │  Cherry Studio    │ ────── :8000/mcp ──────────→ │  Kali MCP Server         │
 │  Claude Desktop   │                              │  (FastMCP 3.x)           │
 └──────────────────┘                              ├──────────────────────────┤
-                                                   │ 🟢 30 网络维护 (默认)    │
-                                                   │ 🟡 26 渗透侦察 (可开关)  │
-                                                   │ 🔴 38 主动攻击 (可开关)   │
-                                                   └──────────────────────────┘
+                                                    │ 🟢 30 网络维护 (默认)    │
+                                                    │ 🟡 26 渗透侦察 (可开关)  │
+                                                    │ 🔴 38 主动攻击 (可开关)   │
+                                                    └──────────────────────────┘
 ```
 
 ---
@@ -635,3 +640,635 @@ ATTACK_ENABLED=true  ──→ 🔴 攻击工具    (需二次开关)
 - ✅ 可以自由查看、学习、修改和分发
 - ❌ **禁止任何商业用途**
 - 📝 二次分发或改编时，须保留原作者署名及本许可证声明
+
+---
+
+## English
+
+## ⚠️ Important Warning
+
+**This toolkit includes reconnaissance, vulnerability scanning, and active-attack modules. Using it against systems you do not own or are not explicitly authorized to test is illegal.**
+
+- 🔴 Attack modules only load with the separate `ATTACK_ENABLED=true` switch (double opt-in)
+- 🟡 Pentest/recon modules require `PENTEST_ENABLED=true`
+- 🟢 Network-maintenance modules are enabled by default
+- **LAN use only** — do not expose to the public internet
+- You are solely responsible for your own actions and their legal consequences
+
+---
+
+## What It Does
+
+Directly in a Cherry Studio / Claude Desktop conversation:
+
+### 🟢 Network Maintenance (30 tools, default)
+
+| Scenario | Example prompt |
+|------|----------|
+| Device discovery | "Scan 192.168.0.0/24 and tell me which devices are online" |
+| Change detection | "Compare against the baseline snapshot — who joined or left the network?" |
+| Traffic stats | "Capture 30 s of traffic and show who is eating the bandwidth" |
+| Per-process bandwidth | "Which process on Kali is using the most bandwidth right now?" |
+| Port monitoring | "Watch ports 22/80/443 on 192.168.0.1" |
+| Port scan | "Which ports and services are open on 192.168.0.13?" |
+| High-speed scan | "Fast-sweep 10.0.0.0/16 and show hosts alive on 80/443" |
+| Connectivity test | "Ping 8.8.8.8 and show latency" |
+| Route diagnosis | "Traceroute to google.com" |
+| Link quality | "MTR report to the gateway" |
+| DNS lookup | "Resolve A and MX records for example.com" |
+| Registration info | "WHOIS lookup for github.com" |
+| Listening services | "What services are listening on Kali right now?" |
+| NIC status | "Show all NICs with IPs and traffic counters" |
+| Routing table | "Show default gateway and routing policy" |
+| Firewall rules | "List the current iptables/nftables firewall rules" |
+| IPv6 status | "Show this host's IPv6 addresses and default gateway" |
+| IPv6 connectivity | "Test whether my public IPv6 path actually works" |
+| IPv6 path | "traceroute6 to 2400:3200::1" |
+| AAAA lookup | "Does example.com have an AAAA record?" |
+| IPv6 neighbours | "What devices are in the IPv6 neighbour table (NDP)?" |
+| IPv6 firewall | "Audit the IPv6 firewall rules — is anything wide open?" |
+| Packet capture | "Capture 100 HTTP packets on eth0" |
+| HTTP test | "curl https://httpbin.org/ip" |
+
+### 🟡 Pentest Recon (26 tools, `PENTEST_ENABLED=true`)
+
+| Scenario | Example prompt |
+|------|----------|
+| Vuln scanning | "Run nuclei against https://example.com" |
+| Web fuzzing | "ffuf-fuzz hidden directories at https://target.com/FUZZ" |
+| DNS recon | "Enumerate subdomains and DNS records for example.com" |
+| Web recon pipeline | "subfinder for example.com subdomains, then httpx to see which serve web" |
+| SNMP enumeration | "snmp-enumerate system info and users on 192.168.0.1" |
+| CVE scan | "nmap-scan 192.168.0.1 for CVEs" |
+| Directory brute-force | "Brute-force hidden directories at http://192.168.0.1" |
+| Web vulns | "nikto-scan http://192.168.0.1" |
+| SMB enumeration | "Enumerate SMB users and shares on 192.168.0.13" |
+| Tech fingerprinting | "What web tech does http://192.168.0.1 run?" |
+| Exploit search | "searchsploit for OpenSSH 7.0" |
+| Password brute-force | "Brute-force SSH on 192.168.0.x with rockyou" |
+| SSL cert check | "When does example.com's certificate expire? Which domains do its SANs cover?" |
+| HTTP load test | "Send 1000 requests (10 concurrent) to http://target — show QPS and latency percentiles" |
+| IPv6 recon | "Map my IPv6 LAN: what RDNSS do routers advertise, which devices use SLAAC addresses?" |
+| IPv6 service scan | "Scan 2408::1 for open ports and services" |
+| Patch audit | "Compare installed patches on this Windows box (192.168.0.100) and find unpatched CVEs" |
+| MSF module search | "Find SMB-related exploits in Metasploit and show ms17_010's options" |
+| MSF job detail | "Read job 12's output — did ssh_login actually succeed?" |
+
+### 🔴 Active Attack (38 tools, plus `ATTACK_ENABLED=true`)
+
+| Scenario | Example prompt |
+|------|----------|
+| SQL injection | "Detect SQLi at http://target/page.php?id=1" |
+| SQL data dump | "Dump the users table from target" |
+| WordPress | "Scan https://blog.example.com for WP vulns and users" |
+| Payload generation | "Generate a Windows x64 reverse-shell payload" |
+| TCP tool | "nc to port 22 on 192.168.0.13" |
+| Hash capture | "Capture NTLM hashes on eth0 for 30 s with Responder" |
+| AD attack | "Check SMB access in the domain with crackmapexec" |
+| WiFi scan | "airodump-ng nearby WiFi for 30 s" |
+| Monitor mode | "Switch wlan0 to monitor mode" |
+| Deauth attack | "Deauth the router at XX:XX to capture a handshake" |
+| WPA cracking | "Crack the WiFi password in capture.cap with a wordlist" |
+| WPS scan | "Find routers with WPS enabled nearby" |
+| ARP MITM | "Sniff traffic between 192.168.0.97 and the gateway" |
+| Ettercap sniffing | "ettercap MITM and capture cleartext credentials" |
+| Bettercap sniffing | "bettercap HTTP/HTTPS MITM to grab cookies" |
+| SSL stripping | "Downgrade the target's HTTPS to HTTP and steal credentials" |
+| Hash cracking | "Crack the captured NTLM hash with john (60 s)" |
+| ARP kick-offline | "Kick 192.168.0.97 offline" / "Restore its network" |
+| DHCP flood | "Exhaust the router's IP pool so new devices can't join WiFi" |
+| MSF exploit/session | "Catch the payload on 127.0.0.1:4444 with multi/handler and run sysinfo in the session" |
+| MSF session cleanup | "Kill session 9 and stop handler job 11" |
+| File upload | "scp /tmp/mcp_only_test.elf to 192.168.0.77:/tmp/" |
+| File download | "Pull /etc/hostname from 192.168.0.77 back to Kali" |
+| File read | "Read the first 64 KB of /tmp/payload.elf on Kali" |
+| File delete | "Delete /tmp/mcp_only_test.elf on Kali to finish cleanup" |
+
+---
+
+## Architecture
+
+```
+┌──────────────────┐       Streamable HTTP        ┌───────────────────────────────┐
+│  Cherry Studio    │ ────── :8000/mcp ──────────→ │  Kali MCP Server              │
+│  Claude Desktop   │                              │  (FastMCP 3.x)                │
+└──────────────────┘                              ├───────────────────────────────┤
+                                                  │ 🟢 30 maintenance (default)    │
+                                                  │ 🟡 26 pentest recon (opt-in)   │
+                                                  │ 🔴 38 active attack (opt-in)   │
+                                                  └───────────────────────────────┘
+```
+
+---
+
+## Quick Start
+
+### 1. Deploy to Kali
+
+```bash
+# Clone the repo
+git clone https://github.com/xhj-cloud/kali-mcp.git
+cd kali-mcp
+
+# One-shot install of system packages + Python venv
+chmod +x setup.sh
+sudo ./setup.sh
+```
+
+> 🔴 **Need `system_patch_audit` (patch-level CVE audit)?** Use `sudo ./setup.sh --tool-level full` instead:
+> it additionally installs attack tools (sqlmap/msfvenom, etc.) and sets up the vuls binary + sshpass shim + vuls2 DB directory
+> (the ~12 GB vuln DB auto-downloads on first use to `/var/lib/kali-mcp-vuls/vuls.db`).
+> This level also sets `PENTEST_ENABLED` / `ATTACK_ENABLED` to `true` in `.env`.
+
+### 2. Configure
+
+```bash
+cat > .env << EOF
+TRANSPORT=http
+HTTP_HOST=0.0.0.0
+HTTP_PORT=8000
+AUTH_TOKEN=
+PENTEST_ENABLED=false
+ATTACK_ENABLED=false
+EOF
+```
+
+### 3. Enable Pentest Recon / Active Attack Modules (important)
+
+Only the 🟢 network-maintenance tools (30) load by default. To use pentest and attack tools you **must flip the switches explicitly**:
+
+```bash
+# Enable 🟡 pentest recon (+26 tools: vuln scanning / web recon pipelines / brute-force / SNMP / cert checks / IPv6 recon / AD enumeration / MSF recon, etc.)
+sed -i 's/^PENTEST_ENABLED=.*/PENTEST_ENABLED=true/' .env
+
+# Enable 🔴 active attack (+33 tools: SQLi / MITM / WiFi cracking / patch audit / AD attacks / MSF exploitation, etc.)
+sed -i 's/^ATTACK_ENABLED=.*/ATTACK_ENABLED=true/' .env
+```
+
+> ⚠️ The attack module requires the pentest module to be enabled **first** (`PENTEST_ENABLED=true`), otherwise attack tools will not load.
+
+**Verify the switches:**
+
+```bash
+grep -E "PENTEST_ENABLED|ATTACK_ENABLED" .env
+# Should print:
+# PENTEST_ENABLED=true
+# ATTACK_ENABLED=true
+```
+
+**Tool count by switch:**
+
+| PENTEST | ATTACK | Tools |
+|:---:|:---:|:---:|
+| false | false | 30 (maintenance only) |
+| true | false | 56 (+ pentest recon + MSF recon) |
+| true | true | 94 (+ active attack + MSF bridge + file transfer) |
+
+### 4. Start
+
+```bash
+source .venv/bin/activate
+PYTHONPATH=src python -m kali_mcp.server
+
+# or run as a background service + start on boot
+sudo cp kali-mcp.service /etc/systemd/system/
+sudo systemctl enable --now kali-mcp
+```
+
+### 5. Fix tool capabilities
+
+```bash
+sudo apt install libcap2-bin -y
+sudo setcap cap_net_raw,cap_net_admin+eip $(which arp-scan)
+sudo setcap cap_net_raw,cap_net_admin+eip $(which tcpdump)
+sudo setcap cap_net_raw,cap_net_admin+eip $(which nethogs)
+```
+
+### 6. Connect an AI client
+
+Cherry Studio → Settings → MCP servers → Add:
+
+| Field | Value |
+|------|-----|
+| Name | Kali Toolbox |
+| Type | HTTP / Streamable HTTP |
+| URL | `http://<kali-ip>:8000/mcp` |
+
+---
+
+## 🖥️ VM Deployment
+
+When Kali runs in a VMware / UTM virtual machine, you need to handle network forwarding.
+
+### Option 1: Bridged mode (recommended)
+
+The VM joins the physical LAN directly and gets its own IP — no extra forwarding needed.
+
+```bash
+# VMware Fusion: Settings → Network Adapter → Bridged (Autodetect)
+# Check the IP inside Kali
+ip addr show eth0 | grep inet
+```
+
+Cherry Studio connects directly to: `http://<Kali-IP>:8000/mcp`
+
+### Option 2: NAT + socat port forwarding
+
+Map the VM's HTTP port onto the host:
+
+```bash
+# 1. Install socat
+brew install socat
+
+# 2. Set the VM network to "Share with my Mac" (NAT)
+
+# 3. Check the NAT IP inside Kali (usually 192.168.xxx.128)
+ip addr show eth0 | grep inet
+
+# 4. Start the forwarder (substitute the real IP)
+socat TCP-LISTEN:8000,fork,reuseaddr TCP:192.168.xxx.128:8000
+```
+
+Cherry Studio connects to: `http://localhost:8000/mcp`
+
+**Auto-forward on boot:**
+
+```bash
+cat > ~/Library/LaunchAgents/com.kali-mcp-forward.plist << 'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple/DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.kali-mcp-forward</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/socat</string>
+        <string>TCP-LISTEN:8000,fork,reuseaddr</string>
+        <string>TCP:KALI_NAT_IP:8000</string>
+    </array>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+</dict>
+</plist>
+PLIST
+
+launchctl load ~/Library/LaunchAgents/com.kali-mcp-forward.plist
+```
+
+### Option 3: Dual NIC
+
+One NIC on NAT for internet access, one bridged NIC serving MCP:
+
+VMware Fusion → Add Device → Network Adapter ×2
+
+| NIC | Mode | Purpose |
+|------|------|------|
+| NIC 1 | NAT | Kali's outbound internet (updates/downloads) |
+| NIC 2 | Bridged | Direct MCP access (192.168.0.x) |
+
+---
+
+## 🔧 FAQ
+
+### 401 Unauthorized — Bearer token required
+
+**Symptom:** `curl` returns 401, Cherry Studio reports an OAuth error.
+
+**Cause:** a leftover `AUTH_TOKEN` value in `.env`, or Cherry Studio has an OAuth auth option enabled.
+
+**Fix:**
+
+```bash
+# Clear the token
+sed -i '/^AUTH_TOKEN=/c\AUTH_TOKEN=' /path/to/kali-mcp/.env
+
+# Confirm the service is reading the right .env
+grep WorkingDirectory /etc/systemd/system/kali-mcp.service
+grep EnvironmentFile /etc/systemd/system/kali-mcp.service
+
+# Restart
+sudo systemctl restart kali-mcp
+
+# Verify (should return a method error, not 401)
+curl http://<Kali-IP>:8000/mcp
+```
+
+On the Cherry Studio side: Settings → MCP → Kali Toolbox → **turn off every OAuth / auth option**, keep only the URL.
+
+### 404 Not Found
+
+**Symptom:** `curl http://IP:8000/` returns 404.
+
+**Explanation:** the MCP endpoint path is `/mcp`, not `/`. The URL must end with `/mcp`.
+
+### Connection Refused / Timeout
+
+```bash
+# 1. On Kali, confirm MCP is listening on 0.0.0.0
+ss -tlnp | grep 8000         # should show 0.0.0.0:8000, not 127.0.0.1
+
+# 2. Confirm the service is running
+sudo systemctl status kali-mcp
+
+# 3. Test connectivity from the Mac
+ping <Kali-IP>
+curl http://<Kali-IP>:8000/mcp
+```
+
+### "Package snmp-check not found"
+
+`snmp-check` is not in Kali's apt repository. `snmpwalk` (from `apt install snmp`) is used instead — no extra install needed.
+
+### Wrong tool count (30 vs 94)
+
+**Symptom:** two VMs show different tool counts — one 30, the other 94.
+
+**Cause:** `PENTEST_ENABLED` and `ATTACK_ENABLED` are `false` in `.env`, so pentest and attack tools never loaded.
+
+**Reference:**
+
+| Config | Tools |
+|------|------|
+| both `false` | 30 (16 network + 4 monitor + 10 IPv6) |
+| `PENTEST=true` | 56 (+8 pentest +6 vuln +4 web recon +2 IPv6 pentest +3 AD enum +3 MSF recon) |
+| both `true` | 94 (+24 attack +4 AD attack +6 MSF attack +4 file transfer) |
+
+**Fix:**
+
+```bash
+# Enable everything in one go
+sed -i 's/PENTEST_ENABLED=false/PENTEST_ENABLED=true/' .env
+sed -i 's/ATTACK_ENABLED=false/ATTACK_ENABLED=true/' .env
+sudo systemctl restart kali-mcp
+```
+
+### Nuclei has no templates
+
+```bash
+# Download the template library on first use (~100 MB)
+nuclei -ut
+
+# Confirm template location
+ls ~/nuclei-templates/http/
+```
+
+### WiFi tools report "wlan0 does not exist"
+
+**Cause:** Kali runs in a VM with no physical wireless adapter.
+
+**Fix:** you need a USB wireless adapter that supports monitor mode, passed through to the VM in VMware:
+
+| Chipset | Recommended model | Price |
+|------|----------|------|
+| Atheros AR9271 | TP-Link TL-WN722N v1 | ≈ ¥30 |
+| Ralink RT3070 | Alfa AWUS036NH | ≈ ¥50 |
+| Realtek RTL8812AU | Alfa AWUS036ACH | ≈ ¥100 |
+
+After plugging it in: VMware → VM Settings → USB Controller → tick the device; Kali auto-detects it as `wlan0`.
+
+### bettercap reports "caplet not found"
+
+**Cause:** bettercap's caplet file path does not match its default.
+
+**Fix:** the code now enables modules directly via `-eval`, with no caplet file dependency. Just update to the latest code:
+
+```bash
+git pull
+sudo systemctl restart kali-mcp
+```
+
+### sslstrip command not found
+
+**Cause:** older setup.sh releases did not install sslstrip (an early audit wrongly concluded "Kali removed the package"; in fact `sslstrip 1.0+git20211125` has always been in the kali-rolling repo).
+
+**Fix (since 2026-09-07):** `setup.sh --tool-level full` now includes `sslstrip` — just reinstall:
+
+```bash
+sudo apt install -y sslstrip
+```
+
+When it is missing, `sslstrip_run` also falls back to bettercap's `http.proxy.sslstrip` module automatically (equivalent, and more powerful).
+
+### Cherry Studio suddenly cannot reach the MCP server
+
+**Cause:** Kali's DHCP IP drifted (e.g. `192.168.0.19` became `192.168.0.233`).
+
+**Fix:**
+
+```bash
+# Check the current IP on Kali
+ip addr show eth0 | grep inet
+
+# Option 1: update the URL in Cherry Studio to the new IP
+# Option 2: give Kali a static IP (recommended, fixes it forever)
+# (adjust the connection name "Wired connection 1" to match yours)
+sudo nmcli connection modify "Wired connection 1" \
+  ipv4.method manual \
+  ipv4.addresses 192.168.0.233/24 \
+  ipv4.gateway 192.168.0.1 \
+  ipv4.dns "192.168.0.1 8.8.8.8"
+sudo nmcli connection up "Wired connection 1"
+```
+
+---
+
+## Real-World Workflows
+
+### 📡 WiFi Cracking (WPA/WPA2)
+
+```
+1. airmon_start wlan0           → switch to monitor mode (yields wlan0mon)
+2. airodump_scan wlan0mon       → scan nearby WiFi + capture handshakes (set write_prefix)
+3. aireplay_deauth wlan0mon     → send deauth frames to force a client reconnect
+4. aircrack_wpa capture.cap     → offline wordlist crack of the password
+5. airmon_stop wlan0mon         → restore managed mode
+```
+
+### 🎭 Man-in-the-Middle
+
+```
+1. arpspoof_mitm 192.168.0.x   → bidirectional ARP spoofing + enable IP forwarding
+2. packet_sniff eth0           → sniff the target's cleartext traffic (HTTP creds/cookies)
+3. or ettercap_mitm            → automatic ARP poisoning + protocol sniffing
+4. or bettercap_mitm           → HTTP proxy + modern credential capture
+5. or sslstrip_run             → SSL stripping (HTTPS→HTTP)
+6. arpspoof_mitm_stop          → stop the attack + disable IP forwarding
+```
+
+### 🎯 Full SQL Injection Chain
+
+```
+1. sqlmap_scan url action=detect          → detect injection points
+2. sqlmap_scan url action=dbs             → enumerate all databases
+3. sqlmap_scan url action=tables          → enumerate tables
+4. sqlmap_scan url action=dump table=users → dump a specific table
+5. sqlmap_scan url action=os_shell        → try to get an OS shell
+```
+
+---
+
+## Full Tool List (94)
+
+| # | Tool | Kali command | Tier | Function |
+|---|--------|-----------|------|------|
+| 1 | `ping_host` | ping | 🟢 | ICMP reachability + latency |
+| 2 | `traceroute_host` | traceroute | 🟢 | Hop-by-hop route tracing |
+| 3 | `mtr_report` | mtr | 🟢 | Combined ping+traceroute link report |
+| 4 | `dig_query` | dig | 🟢 | DNS queries (A/AAAA/MX/NS/TXT…) |
+| 5 | `whois_lookup` | whois | 🟢 | Domain/IP registration info |
+| 6 | `nmap_scan` | nmap | 🟢 | Port/service/OS scan (7 modes) |
+| 7 | `masscan_scan` | masscan | 🟢 | High-speed port scan (thousands of ports/s, T:/U: protocol prefixes, v4≤/16 & v6≤/112 target limits) |
+| 8 | `arp_scan` | arp-scan | 🟢 | ARP device discovery + MAC vendors |
+| 9 | `network_connections` | ss | 🟢 | Listening ports + active connections |
+| 10 | `network_interfaces` | ip addr | 🟢 | NIC IPs + traffic counters |
+| 11 | `routing_table` | ip route | 🟢 | Kernel routing table |
+| 12 | `tcpdump_capture` | tcpdump | 🟢 | Live packet capture (BPF filters) |
+| 13 | `http_request` | curl | 🟢 | HTTP request testing |
+| 14 | `network_diff` | arp-scan | 🟢 | Device change detection (vs snapshot) |
+| 15 | `traffic_stats` | tcpdump | 🟢 | Live traffic stats (top IPs/protocols/ports) |
+| 16 | `port_monitor` | nmap | 🟢 | Port-state monitoring (track open/closed changes) |
+| 17 | `network_topology` | arp-scan | 🟢 | ARP network topology (Mermaid) |
+| 18 | `snmp_topology` | snmpwalk/arp-scan | 🟢 | Precise SNMP topology (ARP fallback) |
+| 19 | `nethogs_bandwidth` | nethogs | 🟢 | Per-process bandwidth (which program eats traffic) |
+| 20 | `firewall_rules` | nft/iptables | 🟢 | Firewall rule inspection (read-only audit) |
+| 21 | `ipv6_status` | ip -6 addr/route | 🟢 | IPv6 addresses/routes/kernel params overview |
+| 22 | `ipv6_ping` | ping -6 | 🟢 | ICMPv6 reachability (can auto-test public DNS) |
+| 23 | `ipv6_traceroute` | traceroute6 | 🟢 | IPv6 path tracing |
+| 24 | `ipv6_dig` | dig AAAA | 🟢 | AAAA lookup + IPv4/IPv6 cross-check |
+| 25 | `ipv6_neigh` | ip -6 neigh | 🟢 | IPv6 neighbour table (NDP) |
+| 26 | `ipv6_firewall` | ip6tables/nft | 🟢 | IPv6 firewall audit (find wide-open exposure) |
+| 27 | `ipv6_scan` | nmap -6/rdisc6 | 🟢 | IPv6 LAN device discovery (NDP/SLAAC/bounded sweep) |
+| 28 | `ipv6_doctor` | multi-layer diagnostics | 🟢 | Full IPv6 health check (addr→route→DNS→ping→egress) |
+| 29 | `ipv6_ra_inspect` | tcpdump ICMPv6 | 🟢 | Passive Router Advertisement capture (advertised prefixes) |
+| 30 | `ipv6_route_debug` | ip -6 route get | 🟢 | IPv6 route/source-address selection diagnosis |
+| 31 | `nmap_vuln_scan` | nmap --script | 🟡 | CVE vulns + broadcast discovery |
+| 32 | `gobuster_dir` | gobuster | 🟡 | Web directory/file brute-force |
+| 33 | `nikto_scan` | nikto | 🟡 | Web vuln scanning (6700+ rules) |
+| 34 | `enum4linux_scan` | enum4linux | 🟡 | SMB user/share/OS enumeration |
+| 35 | `whatweb_scan` | whatweb | 🟡 | Web tech-stack fingerprinting |
+| 36 | `searchsploit` | searchsploit | 🟡 | Offline Exploit-DB search |
+| 37 | `hydra_brute` | hydra | 🟡 | Service password brute-force |
+| 38 | `http_load_test` | ab | 🟡 | HTTP load test (QPS/latency percentiles, capped) |
+| 39 | `nuclei_scan` | nuclei | 🟡 | Template-based vuln scanning (3000+ CVEs) |
+| 40 | `nuclei_results` | cat | 🟡 | Read background nuclei scan results |
+| 41 | `ffuf_fuzz` | ffuf | 🟡 | Web fuzzing (dirs/params/vhosts) |
+| 42 | `dnsenum_scan` | dnsrecon | 🟡 | DNS recon (subdomains/zone transfer) |
+| 43 | `snmpenum_scan` | snmpwalk | 🟡 | SNMP enumeration (system/users/processes/network) |
+| 44 | `ssl_cert_check` | openssl s_client | 🟡 | SSL cert check (validity/SAN/chain verification) |
+| 45 | `subfinder_scan` | subfinder | 🟡 | Passive subdomain discovery (60+ OSINT sources, zero active traffic) |
+| 46 | `httpx_probe` | httpx | 🟡 | Bulk web service probing (status/title/tech/multi-port) |
+| 47 | `dnsx_lookup` | dnsx | 🟡 | Bulk DNS record discovery (A/AAAA/MX/TXT, internal-IP hints) |
+| 48 | `dalfox_scan` | dalfox | 🟡 | XSS scanning (DOM validation + reproducible POC, exit 1 = vuln found) |
+| 49 | `ipv6_recon` | rdisc6/nmap -6 | 🟡 | IPv6 pentest recon (router discovery/RDNSS/SLAAC address guessing) |
+| 50 | `ipv6_service_scan` | nmap -6 -sV -sC | 🟡 | IPv6 service scan (ports/versions/NSE scripts) |
+| 51 | `sqlmap_scan` | sqlmap | 🔴 | SQL injection detection & exploitation |
+| 52 | `wpscan_scan` | wpscan | 🔴 | WordPress vulns + user enumeration |
+| 53 | `msfvenom_gen` | msfvenom | 🔴 | Payload generation (not executed) |
+| 54 | `nc_operate` | netcat | 🔴 | TCP listen/connect/port scan |
+| 55 | `responder_run` | responder | 🔴 | NTLM hash capture/poisoning |
+| 56 | `crackmapexec_run` | crackmapexec | 🔴 | SMB/WinRM/MSSQL attacks |
+| 57 | `airodump_scan` | airodump-ng | 🔴 | WiFi scan + handshake capture |
+| 58 | `airmon_start` | airmon-ng start | 🔴 | Switch NIC to monitor mode |
+| 59 | `airmon_stop` | airmon-ng stop | 🔴 | Restore NIC to managed mode |
+| 60 | `aireplay_deauth` | aireplay-ng | 🔴 | Deauth attack (force a handshake) |
+| 61 | `aircrack_wpa` | aircrack-ng | 🔴 | WPA/WPA2 handshake password cracking |
+| 62 | `wash_scan` | wash | 🔴 | WPS router discovery |
+| 63 | `john_crack` | john | 🔴 | Offline password hash cracking |
+| 64 | `arpspoof_disconnect` | arpspoof | 🔴 | ARP spoof to permanently kick a device offline |
+| 65 | `arpspoof_stop` | kill | 🔴 | Restore a kicked device's network |
+| 66 | `dhcp_flood` | yersinia | 🔴 | DHCP flood to exhaust the IP pool |
+| 67 | `ddos_attack` | hping3/slowloris | 🔴 | DDoS/flood attacks (5 modes) |
+| 68 | `packet_sniff` | tcpdump/tshark | 🔴 | Advanced capture + traffic analysis |
+| 69 | `arpspoof_mitm` | arpspoof | 🔴 | ARP man-in-the-middle (IP forwarding + bidirectional spoof) |
+| 70 | `arpspoof_mitm_stop` | kill | 🔴 | Stop MITM + disable IP forwarding |
+| 71 | `ettercap_mitm` | ettercap | 🔴 | Ettercap ARP poisoning + protocol sniffing |
+| 72 | `bettercap_mitm` | bettercap | 🔴 | Bettercap HTTP/HTTPS MITM |
+| 73 | `sslstrip_run` | sslstrip | 🔴 | SSL stripping (HTTPS→HTTP) |
+| 74 | `system_patch_audit` | vuls | 🔴 | Patch-level audit vs CVE DB (Windows KB/hotfixes + Linux packages) |
+| 75 | `impacket_lookupsid` | impacket | 🟡 | Domain user/SID enumeration (RID cycling, read-only) |
+| 76 | `impacket_secretsdump` | impacket | 🔴 | Remote SAM/SECURITY credential harvesting |
+| 77 | `impacket_dcsync` | impacket | 🔴 | DRSUAPI domain hash sync (needs DCSync rights) |
+| 78 | `impacket_psexec` | impacket | 🔴 | Remote service execution (RemComSvc) |
+| 79 | `impacket_ntlmrelayx` | impacket | 🔴 | NTLM relay MITM (SMB+LLMNR/NBNS, bounded listen surface) |
+| 80 | `peas_linux` | linpeas | 🟡 | Local privilege-escalation enumeration (red/yellow = 95% privesc vectors) |
+| 81 | `peas_windows` | winpeas | 🟡 | Remote privesc enumeration (winpeas staged via psexec -c) |
+| 82 | `msf_search` | msfrpcd RPC | 🟡 | Metasploit module keyword search (exploit/auxiliary/post/payload) |
+| 83 | `msf_show_opts` | msfrpcd RPC | 🟡 | Show all module options (type/required/defaults/description) |
+| 84 | `msf_run_exploit` | msfrpcd RPC | 🔴 | Start an exploit as an msf background job (target→RHOST, client-side option validation) |
+| 85 | `msf_jobs` | msfrpcd RPC | 🔴 | List running msf jobs |
+| 86 | `msf_stop_job` | msfrpcd RPC | 🔴 | Stop a specific msf job |
+| 87 | `msf_sessions` | msfrpcd RPC | 🔴 | List active meterpreter/shell sessions |
+| 88 | `msf_session_exec` | msfrpcd RPC | 🔴 | Run meterpreter/shell commands inside a session |
+| 89 | `msf_kill_session` | msfrpcd RPC (session.stop) | 🔴 | Terminate an active session (int/uuid, meterpreter/shell) |
+| 90 | `msf_job_info` | msfrpcd RPC (job.info) | 🟡 | Read mid-run output of a running msf job (job table is in-memory; removed on completion) |
+| 91 | `file_upload` | scp + sshpass -e | 🔴 | Upload a local file to a target (password via SSHPASS env, never argv) |
+| 92 | `file_download` | scp + sshpass -e | 🔴 | Download a target file to Kali (refuses to overwrite an existing local file) |
+| 93 | `file_read` | local read | 🔴 | Read a file on Kali (64 KiB cap, binary → hexdump head only) |
+| 94 | `file_delete` | local delete | 🔴 | Delete a regular file on Kali (requires confirm=yes, refuses dirs/symlinks) |
+
+---
+
+## Permission Control
+
+```
+ATTACK_ENABLED=true  ──→ 🔴 attack tools    (second switch required)
+    └── PENTEST_ENABLED=true ──→ 🟡 pentest tools  (manual enable)
+             └── (default) ──────────→ 🟢 maintenance tools (always available)
+```
+
+---
+
+## Configuration Reference
+
+| Variable | Default | Description |
+|------|------|------|
+| `TRANSPORT` | `http` | stdio / sse (legacy Cherry Studio) / http |
+| `HTTP_HOST` | `0.0.0.0` | bind address |
+| `HTTP_PORT` | `8000` | port |
+| `AUTH_TOKEN` | empty | Bearer token; leave empty for LAN use |
+| `PENTEST_ENABLED` | `false` | pentest recon module |
+| `ATTACK_ENABLED` | `false` | active attack module |
+| `NUCLEI_TEMPLATES_DIR` | empty (auto-detected) | nuclei templates directory; set when templates live in a non-default location (e.g. `/home/xhj/.local/nuclei-templates`) |
+| `VULS_BIN` | auto | path to the vuls binary (PATH lookup by default) |
+| `VULS_SSH_SHIM_DIR` | `/usr/local/lib/kali-mcp-vuls/bin` | directory of the sshpass ssh wrapper (for password auth) |
+| `VULS2_DB_PATH` | `/var/lib/kali-mcp-vuls/vuls.db` | vuls2 CVE database (~12 GB, auto-downloaded on first use) |
+| `MSF_RPC_PASSWORD` | empty (must be set) | msfrpcd password (auto-generated by `setup.sh --tool-level full`; msfrpcd-only, 127.0.0.1 loopback) |
+| `MSF_RPC_HOST` / `MSF_RPC_PORT` / `MSF_RPC_USER` | `127.0.0.1` / `55553` / `msf` | msfrpcd connection params (change only if msfrpcd is not on the MCP host) |
+| `DEFAULT_TIMEOUT` | `120` | command timeout (seconds) |
+
+---
+
+## Security Design
+
+| Measure | Detail |
+|------|------|
+| Zero command injection | `create_subprocess_exec` with list args; `shell=True` is permanently forbidden |
+| Pydantic validation | Context-tiered: shell contexts block all shell metacharacters; list-arg payloads (curl body, sqlmap --data, etc.) block NUL only, `&<>;$()` pass through as legitimate payload |
+| Three-tier permissions | maintenance→pentest→attack, opt-in step by step; default is maintenance only |
+| Invocation warnings | attack tools force-print a `🔴🔴🔴 ACTIVE ATTACK WARNING` |
+| Dangerous filters | forbids nmap --script writes, tcpdump file writes, etc. |
+| Timeout protection | independent timeout per command |
+
+---
+
+## Repair & Change Log
+
+Each fix/change gets its **own dated md file**, all stored in the [修复记录/](修复记录/) folder (index: [修复记录/README.md](修复记录/README.md)).
+
+---
+
+## Disclaimer
+
+This tool is intended solely for authorized security testing, education/research, and network maintenance. Users must comply with the laws of their country/region. The author accepts no responsibility for misuse.
+
+---
+
+## License
+
+This project is open-sourced under [CC BY-NC 4.0](LICENSE) (Creative Commons Attribution-NonCommercial 4.0 International):
+
+- ✅ Free to view, learn, modify, and share
+- ❌ **No commercial use of any kind**
+- 📝 Redistribution or adaptation must retain the original attribution and this license notice
