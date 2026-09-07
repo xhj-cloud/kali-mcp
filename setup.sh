@@ -133,6 +133,8 @@ PENTEST_PKGS=(
     seclists
     exploitdb
     apache2-utils   # ab — http_load_test
+    python3-impacket  # impacket 五件套 (lookupsid/secretsdump/dcsync/psexec/ntlmrelayx)
+    peass           # peas_linux/peas_windows — /usr/share/peass/{linpeas,winpeas}
     ndisc6          # rdisc6 — ipv6_recon 路由发现
 )
 

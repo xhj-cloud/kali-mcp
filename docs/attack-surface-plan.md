@@ -74,16 +74,22 @@
 - 实现：python-metasploit3（会话状态比 subprocess 干净）
 - 补："发现漏洞→利用→拿 shell"链路在此闭环，与所有竞品的最大差距项
 
-### P0-4 Impacket 五件套（1.5 天，AD 手术点）
+### P0-4 Impacket 五件套（1.5 天，AD 手术点）✅ 已完成 2026-09-07
 - `impacket_lookupsid` 域用户/SID 枚举 🟡（只读）
 - `impacket_secretsdump` 凭据收割 🔴
 - `impacket_dcsync` 🔴
 - `impacket_psexec` 远程执行 🔴
 - `impacket_ntlmrelayx` NTLM 中继 🔴
 - 补：AD 后渗透最高频动作（AdStrike 63 模块的核心浓缩）
-- 依赖：impacket Kali 预装；保留现有 crackmapexec_run
+- 依赖：impacket Kali 预装（`python3-impacket`，setup.sh 已加）；保留现有 crackmapexec_run
+- **执行日志（Kali v0.14.0.dev0 实测踩坑）**：
+  1. impacket 统一凭据串 `[[domain/]user[:pass]@]target`，**无 -u/-p 标志**；无用户名时自动加 `-no-pass`（匿名，快速失败不挂起）
+  2. **DCSync 在 secretsdump 内部**（`-just-dc`），独立工具只是薄封装
+  3. pass-the-hash 走独立 `-hashes LM:NT` 标志，**不嵌入** target 串
+  4. lookupsid 真实输出格式 `500: CORP\Administrator (User)`（源码 line 138），域 SID 只在 stderr 的 `Domain SID is:` 行
+  5. ntlmrelayx 监听面有界化：默认关 `--no-http/--no-wcf/--no-winrm/--no-rpc-server`，仅 SMB+raw；超时/空窗口不算失败
 
-## 四、P1 — 战略差异化（再 2 周，→ 89 工具）
+## 四、P1 — 战略差异化（再 2 周，→ 86 工具；P1-2/P1-4 已完成）
 
 ### P1-1 BloodHound CE 攻击路径图（3 天，最可能的护城河）
 - `bloodhound_collect` 采集 AD/ADCS 图 🟡
@@ -91,10 +97,12 @@
 - 护城河逻辑：PentestThinkingMCP 用 MCTS（纯推理无数据），AdStrike 用 SAST 知识库（静态），本项目出"真实图数据 + 结构化路径分析"，生态无直接竞品，契合结构化分析 DNA
 - 依赖：pip 装 CE collector
 
-### P1-2 提权枚举：linpeas + winpeas（1 天，🟡 只读）
+### P1-2 提权枚举：linpeas + winpeas（1 天，🟡 只读）✅ 已完成 2026-09-07
 - `peas_linux` / `peas_windows` 一次性提权枚举
-- 增值：把 3000 行输出解析成"Top 10 高价值提权向量"结构化列表
-- 依赖：GitHub 脚本（Kali 仓库没有，install.sh 一行）
+- 增值：输出解析成"红/黄高亮 = 95% 提权向量"结构化列表 + 分节清单
+- 依赖修正：Kali apt **有** `peass` 包（20260715），setup.sh 已加——但 `/usr/bin/{lin,win}peas` 是 kali-treecd **viewer 包装器不是 runner**，真实 payload 在 `/usr/share/peass/linpeas/linpeas.sh`（self-contained LinPEAS-ng，755 可执行）与 `/usr/share/peass/winpeas/winPEAS*.exe`
+- 包 bug：help 列小写 `-n`，getopts 只认大写 `N`（小写静默掉进 help）——工具统一用 `-q -N`
+- winpeas 经 `impacket-psexec -c` 暂存到目标临时目录（报告明示不自动清理）
 
 ### P1-3 Kerberos：Rubeus（1 天，🔴）
 - `rubeus_kerberoast` / `rubeus_asreproast` / `rubeus_golden`（仅 lab）
@@ -129,14 +137,14 @@
 每项验收标准（沿用现有基线）：
 1. 代码：命令列表（禁 `shell=True`）、参数校验、门控注册（🟡→PENTEST_TOOLS 族，🔴→ATTACK_TOOLS）
 2. 测试：每工具 ≥3 个 pytest（cmd 构造/门控/输出解析），全绿
-3. Live 验证：限自己网段（10.69.76.0/24 + `2409:8931::/64` + 自有 lab），不碰公网
+3. Live 验证：限自己网段（192.168.0.0/24 + `2409:8931::/64` + 自有 lab），不碰公网
 4. 交付：GitHub + Gitea 双推
 
 **环境前置（一次性，Kali 回内网后）**：
 - apt 确认 subfinder/dnsx/masscan/impacket/rubeus 版本（aarch64）；httpx/dalfox 不在 apt——
   装 GitHub release 二进制（setup.sh `_web_binaries_setup`：httpx zip / dalfox deb，sha256 校验）
+- ✅ impacket（`python3-impacket`）+ `peass` 已入 setup.sh（2026-09-07，aarch64 验证过）
 - pip 装 python-metasploit3 + bloodhound-python
-- git 装 linpeas + winpeas 两个脚本
 - systemd 起 msfrpcd（密码走 .env）
 
 **⚠️ 非工具但必须随 P0 一起做的两件事**：
@@ -145,6 +153,6 @@
 
 ## 八、预期结果
 
-- **工具数**：69 → ~89（拒绝 200+）
+- **工具数**：69 → 81（P0-1/2/4 + P1-2/4 完成；余 P0-3 + P1-1/P1-3 → ~92，拒绝 200+）
 - **杀伤链**：Recon 5★｜Weaponization 2→4★｜Exploitation 3→4★｜Initial Access 4→5★｜Post-Exploitation 1→3★｜Lateral 1→3★｜C2 ☆（暂缓）
 - **定位**：IPv6 套件 + 安全门控 + 真实数据攻击路径图——三点组合在 2026 生态里无直接竞品

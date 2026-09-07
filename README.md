@@ -1,11 +1,11 @@
 # 🔍 Kali MCP Server
 
-> 将 Kali Linux 变成你的 AI 网络助手 —— 74 个工具，从网络维护到漏洞挖掘，对话即操作。
+> 将 Kali Linux 变成你的 AI 网络助手 —— 74 个工具，从网络维护到 AD 横向，对话即操作。
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
 [![FastMCP](https://img.shields.io/badge/FastMCP-3.4+-green.svg)](https://gofastmcp.com)
 [![License](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightblue.svg)](LICENSE)
-[![Tools](https://img.shields.io/badge/Tools-74-orange.svg)]()
+[![Tools](https://img.shields.io/badge/Tools-81-orange.svg)]()
 
 ---
 
@@ -110,8 +110,8 @@
 │  Claude Desktop   │                              │  (FastMCP 3.x)           │
 └──────────────────┘                              ├──────────────────────────┤
                                                    │ 🟢 30 网络维护 (默认)    │
-                                                   │ 🟡 20 渗透侦察 (可开关)  │
-                                                   │ 🔴 24 主动攻击 (可开关)   │
+                                                   │ 🟡 23 渗透侦察 (可开关)  │
+                                                   │ 🔴 28 主动攻击 (可开关)   │
                                                    └──────────────────────────┘
 ```
 
@@ -177,8 +177,8 @@ grep -E "PENTEST_ENABLED|ATTACK_ENABLED" .env
 | PENTEST | ATTACK | 工具数 |
 |:---:|:---:|:---:|
 | false | false | 30（仅网络维护） |
-| true | false | 50（+渗透侦察） |
-| true | true | 74（+主动攻击） |
+| true | false | 53（+渗透侦察） |
+| true | true | 81（+主动攻击） |
 
 ### 4. 启动
 
@@ -337,9 +337,9 @@ curl http://<Kali-IP>:8000/mcp
 
 `snmp-check` 不在 Kali apt 仓库。已改用 `snmpwalk`（`apt install snmp`）替代，无需额外安装。
 
-### 工具数量不对（30 个 vs 74 个）
+### 工具数量不对（30 个 vs 81 个）
 
-**现象：** 两台虚拟机工具数不同，一台 30 个，一台 74 个。
+**现象：** 两台虚拟机工具数不同，一台 30 个，一台 81 个。
 
 **原因：** `.env` 中 `PENTEST_ENABLED` 和 `ATTACK_ENABLED` 为 `false`，渗透和攻击工具未加载。
 
@@ -348,8 +348,8 @@ curl http://<Kali-IP>:8000/mcp
 | 配置 | 工具数 |
 |------|------|
 | 两个都 `false` | 30（16 网络 + 4 监视 + 10 IPv6） |
-| `PENTEST=true` | 50（+8 渗透 + 6 挖洞 + 4 Web 侦察 + 2 IPv6 渗透） |
-| 两个都 `true` | 74（+24 攻击） |
+| `PENTEST=true` | 53（+8 渗透 + 6 挖洞 + 4 Web 侦察 + 2 IPv6 渗透 + 3 AD 枚举） |
+| 两个都 `true` | 81（+24 攻击 + 4 AD 攻击） |
 
 **解决：**
 
@@ -541,6 +541,13 @@ sudo nmcli connection up "有线连接 1"
 | 72 | `bettercap_mitm` | bettercap | 🔴 | Bettercap HTTP/HTTPS 中间人 |
 | 73 | `sslstrip_run` | sslstrip | 🔴 | SSL 剥离攻击（HTTPS→HTTP） |
 | 74 | `system_patch_audit` | vuls | 🔴 | 补丁比对找漏洞（Windows KB/热修复 + Linux 包 vs CVE 库） |
+| 75 | `impacket_lookupsid` | impacket | 🟡 | 域用户/SID 枚举（RID 遍历，只读） |
+| 76 | `impacket_secretsdump` | impacket | 🔴 | 远程 SAM/SECURITY 凭据收割 |
+| 77 | `impacket_dcsync` | impacket | 🔴 | DRSUAPI 域哈希同步（需 DCSync 权限） |
+| 78 | `impacket_psexec` | impacket | 🔴 | 远程服务执行（RemComSvc） |
+| 79 | `impacket_ntlmrelayx` | impacket | 🔴 | NTLM 中继 MITM（SMB+LLMNR/NBNS，有界监听面） |
+| 80 | `peas_linux` | linpeas | 🟡 | 本地提权枚举（红/黄高亮 = 95% 提权向量） |
+| 81 | `peas_windows` | winpeas | 🟡 | 远程提权枚举（psexec -c 暂存 winpeas） |
 
 ---
 

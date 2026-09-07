@@ -191,6 +191,15 @@ if _pentest_enabled:
         logger.info(
             "IPv6 pentest tools: %d registered", len(IPV6_PENTEST_TOOLS)
         )
+
+        # AD / privesc enumeration tools (impacket lookupsid + peas; same guard)
+        from kali_mcp.ad import AD_PENTEST_TOOLS
+
+        for _name, (_func, _model) in AD_PENTEST_TOOLS.items():
+            _register_tool_with_model(_name, _func, _model)
+            logger.info("Registered AD tool: %s", _name)
+
+        logger.info("AD pentest tools: %d registered", len(AD_PENTEST_TOOLS))
     except ImportError as e:
         logger.warning("Pentest module import failed: %s", e)
 else:
@@ -210,6 +219,17 @@ if _attack_enabled:
 
         logger.info("Attack tools: %d registered (ATTACK_ENABLED=%s)",
                      len(ATTACK_TOOLS), os.getenv("ATTACK_ENABLED"))
+
+        # AD / privesc attack tools (impacket secretsdump/dcsync/psexec/ntlmrelayx)
+        from kali_mcp.ad import AD_ATTACK_TOOLS
+
+        for _name, (_func, _model) in AD_ATTACK_TOOLS.items():
+            _register_tool_with_model(_name, _func, _model)
+            logger.info("Registered AD attack tool: %s", _name)
+
+        logger.info(
+            "AD attack tools: %d registered", len(AD_ATTACK_TOOLS)
+        )
     except ImportError as e:
         logger.warning("Attack module import failed: %s", e)
 else:
