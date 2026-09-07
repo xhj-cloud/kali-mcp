@@ -147,6 +147,62 @@ _nuclei_setup() {
     fi
 }
 
+# --- msfrpcd (Metasploit RPC daemon) for the msf_* tools ---
+# Kali packaging gotchas (verified 2026-09-07, Kali arm64):
+#   - `-h` is the help flag; the bind address is `-a`
+#   - WorkingDirectory must NOT be /: with CWD=/, Rails config.root=/ puts
+#     /lib (→ /usr/lib) on the load path and bootsnap's recursive scan hits
+#     Kali's llvm-21/build/Release symlink loop → ELOOP crash at boot
+#   - `-S` disables SSL on the RPC socket (safe: bound to 127.0.0.1 only)
+#   - the venv cannot see apt's /usr/lib/python3/dist-packages, so a .pth
+#     file is written into the venv's site-packages
+_msfrpcd_setup() {
+    # 1) password in .env (generated once, chmod 600, never committed)
+    if ! grep -q "^MSF_RPC_PASSWORD=" "$SCRIPT_DIR/.env" 2>/dev/null; then
+        local PW
+        PW=$(openssl rand -hex 24)
+        echo "MSF_RPC_PASSWORD=$PW" >> "$SCRIPT_DIR/.env"
+        chmod 600 "$SCRIPT_DIR/.env" 2>/dev/null || true
+        echo -e "  msfrpcd password ${CYAN}generated${NC} into .env (MSF_RPC_PASSWORD)"
+    fi
+    # 2) systemd unit (loopback-only, no DB, no SSL, foreground)
+    $SUDO tee /etc/systemd/system/msfrpcd.service > /dev/null <<MSFRPCD
+[Unit]
+Description=Metasploit RPC daemon (msfrpcd) for kali-mcp
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/usr/share/metasploit-framework
+Environment=HOME=/root
+EnvironmentFile=-$SCRIPT_DIR/.env
+ExecStart=/usr/bin/msfrpcd -f -n -S -a 127.0.0.1 -p 55553 -U msf -P \${MSF_RPC_PASSWORD}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+MSFRPCD
+    $SUDO systemctl daemon-reload
+    $SUDO systemctl enable msfrpcd > /dev/null 2>&1
+    $SUDO systemctl restart msfrpcd
+    # 3) venv .pth so the venv python can import the apt pymetasploit3
+    if [ -x "$VENV_DIR/bin/python3" ] && [ -d /usr/lib/python3/dist-packages/pymetasploit3 ]; then
+        local SP
+        SP=$("$VENV_DIR/bin/python3" -c "import site; print(site.getsitepackages()[0])")
+        echo "/usr/lib/python3/dist-packages" | $SUDO tee "$SP/kali_system_dist.pth" > /dev/null
+        ok "venv can import pymetasploit3 (.pth installed)"
+    fi
+    # 4) wait for the Rails boot (~15-25s on arm64) and verify
+    sleep 20
+    if $SUDO systemctl is-active --quiet msfrpcd; then
+        ok "msfrpcd running on 127.0.0.1:55553 (msf_* tools ready)"
+    else
+        warn "msfrpcd not active — check: sudo journalctl -u msfrpcd -n 30"
+    fi
+}
+
 # --- Web probe binaries NOT in apt: httpx (ProjectDiscovery), dalfox ---
 # Kali/Debian apt does not ship ProjectDiscovery httpx (where a package
 # named httpx exists it is an unrelated curl-style client), and dalfox
@@ -309,6 +365,7 @@ ATTACK_PKGS=(
     ettercap-text-only
     bettercap
     sshpass         # system_patch_audit — password auth via PATH shim (never argv)
+    python3-pymetasploit3  # msf_* tools — msfrpcd RPC client (DanMcInerney fork, Kali-maintained)
 )
 
 step "1/6" "Installing system packages (level: ${TOOL_LEVEL})..."
@@ -428,6 +485,15 @@ if grep -q "^ATTACK_ENABLED=false" "$SCRIPT_DIR/.env" 2>/dev/null; then
     if [ "$TOOL_LEVEL" = "full" ]; then
         sed -i "s/^ATTACK_ENABLED=false/ATTACK_ENABLED=true/" "$SCRIPT_DIR/.env"
         ok "ATTACK_ENABLED=true (matched --tool-level)"
+    fi
+fi
+
+# msfrpcd daemon for the msf_* tools (needs .env + venv from above)
+if [ "$TOOL_LEVEL" = "full" ]; then
+    if command -v msfrpcd &>/dev/null && [ -d /usr/lib/python3/dist-packages/pymetasploit3 ]; then
+        _msfrpcd_setup
+    else
+        warn "msfrpcd / python3-pymetasploit3 not found — msf_* tools will report a config error until installed"
     fi
 fi
 

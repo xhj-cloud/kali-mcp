@@ -1,7 +1,7 @@
 # kali-mcp 攻击面完善方案（取长补短）
 
 > 制定日期：2026-09-05。基于 GitHub 同类工具调研（176 个 "kali mcp" 相关仓库）+ 自身 69 工具现状。
-> 状态：执行中。P0 目标 1 周，P1 目标再 2 周。
+> 状态：P0 全部完成（P0-1/2/3/4，2026-09-07）。P1 余 P1-1 BloodHound CE + P1-3 Rubeus。
 >
 > **执行日志**
 > - 2026-09-05 ✅ P0-2 masscan 完成（代码 + 53 个测试，381 全绿）。**门控决策：定为 🟢 绿色**（与 nmap_scan 同级，始终可用），
@@ -33,6 +33,19 @@
 >   （非执行失败），JSON 结构 `{"findings":[{type V/R/A/I, severity, param, location, payload,
 >   data(POC URL), ...}], "meta":{...}}`。另：httpx/dalfox 的安装逻辑已并入 setup.sh
 >   `_web_binaries_setup`（架构检测 + 重试 + sha256），并从 apt 包列表移除不存在的 `httpx`。
+> - 2026-09-07 ✅ P0-3 Metasploit RPC 桥完成（新模块 `msf.py`：`msf_search`/`msf_show_opts` 🟡 +
+>   `msf_run_exploit`/`msf_jobs`/`msf_stop_job`/`msf_sessions`/`msf_session_exec` 🔴，69 个新测试，
+>   **636 全绿，总数 88 = 🟢30/🟡25/🔴33**）。库用 Kali apt `python3-pymetasploit3`（DanMcInerney fork；
+>   原计划 pip python-metasploit3 已从 PyPI Gone、rbtmm 仓库 404）。msfrpcd 以 systemd 服务跑
+>   （127.0.0.1:55553，`-n -S`，密码 openssl rand 生成进 .env）。live 全链路验证：handler 接住
+>   aarch64 stageless meterpreter → session → `getuid` → 清理。pymetasploit3 API 坑（live 验证）：
+>   `search` 返回 list 无 desc；`info` 键是 `description`；`jobs.list`/`sessions.list` 是 property 且
+>   sessions 键是原生 int；`execute` 返回 `job_id: int|None`（缺必填选项 = None 无异常）；未知选项
+>   服务端**静默忽略**（故客户端白名单校验）；`SessionManager.session()` 包 bug（`_create_session`
+>   参数错位，int 键进 re.match 崩）→ 直接构造 `MeterpreterSession(sid, client, data)` 绕过；
+>   meterpreter 输出在 run_single 返回后才到 ring，裸 read() 竞态 → 轮询读取。
+>   msfrpcd 坑：`-a` 才是绑定地址（`-h` 是帮助）；CWD 不能是 /（bootsnap 扫 /lib 符号链接环 ELOOP）；
+>   venv 看不到 apt 包 → setup.sh 写 `.pth`。
 
 ## 一、缺口盘点（对照 2026 竞品）
 
@@ -68,11 +81,19 @@
 - 输出：原始输出 + 自动解析的"开放端口汇总表"（按主机分组）+ nmap 详查建议
 - 与 nmap 形成"快扫→详查"两级
 
-### P0-3 Metasploit RPC 桥（2 天，全方案最高价值）
+### P0-3 Metasploit RPC 桥（2 天，全方案最高价值）✅ 已完成 2026-09-07
 - 前置：Kali 上 msfrpcd 跑 systemd 服务（密码走 .env，不入库）
 - `msf_search` 🟡 / `msf_show_opts` 🟡 / `msf_run_exploit` 🔴 / `msf_jobs` + `msf_stop_job` 🔴 / `msf_sessions` 🔴 / `msf_session_exec`（meterpreter 命令）🔴
-- 实现：python-metasploit3（会话状态比 subprocess 干净）
+- 实现：Kali apt `python3-pymetasploit3`（DanMcInerney fork，Kali 维护；原计划 pip python-metasploit3 已从 PyPI 消失、rbtmm 仓库 404）
 - 补："发现漏洞→利用→拿 shell"链路在此闭环，与所有竞品的最大差距项
+- **执行日志（Kali 6.5.0 arm64 + python3-pymetasploit3 1.0.3 实测踩坑）**：
+  1. msfrpcd `-h` 是帮助，绑定地址是 `-a`；`-S` 关 RPC socket SSL（仅 127.0.0.1 绑定，安全）；`-n` 免 DB、`-f` 前台
+  2. **CWD 不能是 /**：Rails `config.root` 默认 `Dir.pwd`，CWD=/ 时 /lib(→/usr/lib) 进 load path，bootsnap 递归扫描命中 Kali llvm-21/build/Release 符号链接环 → ELOOP 崩溃。unit 必须 `WorkingDirectory=/usr/share/metasploit-framework`
+  3. venv 看不到 apt 的 `/usr/lib/python3/dist-packages`，setup.sh 往 venv site-packages 写 `kali_system_dist.pth`
+  4. pymetasploit3 API 形状（live 验证）：`modules.search` 返回 **list**（无 desc 字段）；`module.info` 用键 `description`；`jobs.list`/`sessions.list` 是 **property** 且 sessions 键是 **原生 int**；`module.execute` 返回 `{'job_id': int|None, 'uuid': ...}`——缺必填选项时 job_id=None 且**无异常**；未知选项名服务端**静默忽略**（故客户端先校验）
+  5. **包 bug**：`SessionManager.session()` 的 `_create_session` 把整个 session 列表当描述传参 → int 键进 `re.match` 崩。绕过：直接 `MeterpreterSession(sid, client, description)` 构造
+  6. payload 命名是 `linux/aarch64/*`（非 arm64）；msfvenom `-f elf` 才能直接执行（raw 是裸 shellcode）；stager 型 payload 只在 handler 已绑定后连接一次，早了直接 exit 2
+  7. 客户端 `persistentlogin=False` + `logout()`，避免每次调用在 msfrpcd 里堆永久 token
 
 ### P0-4 Impacket 五件套（1.5 天，AD 手术点）✅ 已完成 2026-09-07
 - `impacket_lookupsid` 域用户/SID 枚举 🟡（只读）
@@ -153,6 +174,6 @@
 
 ## 八、预期结果
 
-- **工具数**：69 → 81（P0-1/2/4 + P1-2/4 完成；余 P0-3 + P1-1/P1-3 → ~92，拒绝 200+）
+- **工具数**：69 → 88（P0-1/2/3/4 + P1-2/4 完成；余 P1-1/P1-3 → ~92，拒绝 200+）
 - **杀伤链**：Recon 5★｜Weaponization 2→4★｜Exploitation 3→4★｜Initial Access 4→5★｜Post-Exploitation 1→3★｜Lateral 1→3★｜C2 ☆（暂缓）
 - **定位**：IPv6 套件 + 安全门控 + 真实数据攻击路径图——三点组合在 2026 生态里无直接竞品

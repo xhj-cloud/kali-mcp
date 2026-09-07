@@ -200,6 +200,15 @@ if _pentest_enabled:
             logger.info("Registered AD tool: %s", _name)
 
         logger.info("AD pentest tools: %d registered", len(AD_PENTEST_TOOLS))
+
+        # Metasploit RPC bridge — read-only half (search / show opts)
+        from kali_mcp.msf import MSF_PENTEST_TOOLS
+
+        for _name, (_func, _model) in MSF_PENTEST_TOOLS.items():
+            _register_tool_with_model(_name, _func, _model)
+            logger.info("Registered MSF tool: %s", _name)
+
+        logger.info("MSF pentest tools: %d registered", len(MSF_PENTEST_TOOLS))
     except ImportError as e:
         logger.warning("Pentest module import failed: %s", e)
 else:
@@ -229,6 +238,17 @@ if _attack_enabled:
 
         logger.info(
             "AD attack tools: %d registered", len(AD_ATTACK_TOOLS)
+        )
+
+        # Metasploit RPC bridge — active half (run exploit / jobs / sessions)
+        from kali_mcp.msf import MSF_ATTACK_TOOLS
+
+        for _name, (_func, _model) in MSF_ATTACK_TOOLS.items():
+            _register_tool_with_model(_name, _func, _model)
+            logger.info("Registered MSF attack tool: %s", _name)
+
+        logger.info(
+            "MSF attack tools: %d registered", len(MSF_ATTACK_TOOLS)
         )
     except ImportError as e:
         logger.warning("Attack module import failed: %s", e)

@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
 [![FastMCP](https://img.shields.io/badge/FastMCP-3.4+-green.svg)](https://gofastmcp.com)
 [![License](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightblue.svg)](LICENSE)
-[![Tools](https://img.shields.io/badge/Tools-81-orange.svg)]()
+[![Tools](https://img.shields.io/badge/Tools-88-orange.svg)]()
 
 ---
 
@@ -54,7 +54,7 @@
 | 抓包分析 | "抓取 eth0 上 100 个 HTTP 数据包" |
 | HTTP 测试 | "用 curl 请求 https://httpbin.org/ip" |
 
-### 🟡 渗透侦察（19 工具，`PENTEST_ENABLED=true`）
+### 🟡 渗透侦察（23 工具，`PENTEST_ENABLED=true`）
 
 | 场景 | 对话示例 |
 |------|----------|
@@ -75,8 +75,9 @@
 | IPv6 侦察 | "摸一下 IPv6 局域网：路由器通告的 RDNSS 是什么、哪些设备是 SLAAC 地址" |
 | IPv6 服务扫描 | "扫一下 2408::1 开放了哪些端口和服务" |
 | 补丁比对 | "对比 192.168.0.100 这台 Windows 的补丁，找出还没修复的漏洞" |
+| MSF 模块搜索 | "搜一下 Metasploit 里有哪些 SMB 相关的 exploit，看看 ms17_010 的选项" |
 
-### 🔴 主动攻击（24 工具，额外 `ATTACK_ENABLED=true`）
+### 🔴 主动攻击（28 工具，额外 `ATTACK_ENABLED=true`）
 
 | 场景 | 对话示例 |
 |------|----------|
@@ -99,6 +100,7 @@
 | 哈希破解 | "john 破解捕获的 NTLM 哈希（60 秒）" |
 | ARP 踢人 | "把 192.168.0.97 踢下线" / "恢复它的网络" |
 | DHCP 泛洪 | "耗尽路由器 IP 池，新设备无法连 WiFi" |
+| MSF 利用/会话 | "用 multi/handler 接住 127.0.0.1:4444 的 payload，拿到 session 后跑 sysinfo" |
 
 ---
 
@@ -154,10 +156,10 @@ EOF
 默认只加载 🟢 网络维护工具（30 个）。要使用渗透和攻击工具，**必须显式开启开关**：
 
 ```bash
-# 开启 🟡 渗透侦察模块（+20 工具，漏洞扫描/Web 侦察管线/XSS 扫描/爆破/SNMP/证书检查/IPv6 侦察等）
+# 开启 🟡 渗透侦察模块（+25 工具，漏洞扫描/Web 侦察管线/爆破/SNMP/证书检查/IPv6 侦察/AD 枚举/MSF 侦察等）
 sed -i 's/^PENTEST_ENABLED=.*/PENTEST_ENABLED=true/' .env
 
-# 开启 🔴 主动攻击模块（+24 工具，SQL注入/中间人/WiFi破解/补丁比对等）
+# 开启 🔴 主动攻击模块（+33 工具，SQL注入/中间人/WiFi破解/补丁比对/AD 攻击/MSF 利用等）
 sed -i 's/^ATTACK_ENABLED=.*/ATTACK_ENABLED=true/' .env
 ```
 
@@ -177,8 +179,8 @@ grep -E "PENTEST_ENABLED|ATTACK_ENABLED" .env
 | PENTEST | ATTACK | 工具数 |
 |:---:|:---:|:---:|
 | false | false | 30（仅网络维护） |
-| true | false | 53（+渗透侦察） |
-| true | true | 81（+主动攻击） |
+| true | false | 55（+渗透侦察 + MSF 侦察） |
+| true | true | 88（+主动攻击 + MSF 桥） |
 
 ### 4. 启动
 
@@ -337,9 +339,9 @@ curl http://<Kali-IP>:8000/mcp
 
 `snmp-check` 不在 Kali apt 仓库。已改用 `snmpwalk`（`apt install snmp`）替代，无需额外安装。
 
-### 工具数量不对（30 个 vs 81 个）
+### 工具数量不对（30 个 vs 88 个）
 
-**现象：** 两台虚拟机工具数不同，一台 30 个，一台 81 个。
+**现象：** 两台虚拟机工具数不同，一台 30 个，一台 88 个。
 
 **原因：** `.env` 中 `PENTEST_ENABLED` 和 `ATTACK_ENABLED` 为 `false`，渗透和攻击工具未加载。
 
@@ -348,8 +350,8 @@ curl http://<Kali-IP>:8000/mcp
 | 配置 | 工具数 |
 |------|------|
 | 两个都 `false` | 30（16 网络 + 4 监视 + 10 IPv6） |
-| `PENTEST=true` | 53（+8 渗透 + 6 挖洞 + 4 Web 侦察 + 2 IPv6 渗透 + 3 AD 枚举） |
-| 两个都 `true` | 81（+24 攻击 + 4 AD 攻击） |
+| `PENTEST=true` | 55（+8 渗透 + 6 挖洞 + 4 Web 侦察 + 2 IPv6 渗透 + 3 AD 枚举 + 2 MSF 侦察） |
+| 两个都 `true` | 88（+24 攻击 + 4 AD 攻击 + 5 MSF 攻击） |
 
 **解决：**
 
@@ -548,6 +550,13 @@ sudo nmcli connection up "有线连接 1"
 | 79 | `impacket_ntlmrelayx` | impacket | 🔴 | NTLM 中继 MITM（SMB+LLMNR/NBNS，有界监听面） |
 | 80 | `peas_linux` | linpeas | 🟡 | 本地提权枚举（红/黄高亮 = 95% 提权向量） |
 | 81 | `peas_windows` | winpeas | 🟡 | 远程提权枚举（psexec -c 暂存 winpeas） |
+| 82 | `msf_search` | msfrpcd RPC | 🟡 | Metasploit 模块数据库关键词搜索（exploit/auxiliary/post/payload） |
+| 83 | `msf_show_opts` | msfrpcd RPC | 🟡 | 查看模块全部选项（类型/必填/默认值/说明） |
+| 84 | `msf_run_exploit` | msfrpcd RPC | 🔴 | 以 msf 后台作业启动 exploit（target→RHOST，选项客户端校验） |
+| 85 | `msf_jobs` | msfrpcd RPC | 🔴 | 列出运行中的 msf 作业 |
+| 86 | `msf_stop_job` | msfrpcd RPC | 🔴 | 停止指定 msf 作业 |
+| 87 | `msf_sessions` | msfrpcd RPC | 🔴 | 列出活跃 meterpreter/shell 会话 |
+| 88 | `msf_session_exec` | msfrpcd RPC | 🔴 | 在会话内执行 meterpreter/shell 命令 |
 
 ---
 
@@ -575,6 +584,8 @@ ATTACK_ENABLED=true  ──→ 🔴 攻击工具    (需二次开关)
 | `VULS_BIN` | 自动查找 | vuls 二进制路径（默认 PATH 查找） |
 | `VULS_SSH_SHIM_DIR` | `/usr/local/lib/kali-mcp-vuls/bin` | sshpass ssh 包装器目录（密码认证用） |
 | `VULS2_DB_PATH` | `/var/lib/kali-mcp-vuls/vuls.db` | vuls2 漏洞数据库（~12GB，首次自动下载） |
+| `MSF_RPC_PASSWORD` | 空(需配置) | msfrpcd 密码（setup.sh --tool-level full 自动生成，仅 msfrpcd 使用，127.0.0.1 回环） |
+| `MSF_RPC_HOST` / `MSF_RPC_PORT` / `MSF_RPC_USER` | `127.0.0.1` / `55553` / `msf` | msfrpcd 连接参数（仅当 msfrpcd 不在 MCP 同机时修改） |
 | `DEFAULT_TIMEOUT` | `120` | 命令超时(秒) |
 
 ---
