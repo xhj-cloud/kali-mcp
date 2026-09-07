@@ -8,6 +8,13 @@
 >   比原方案（🟡）更宽——安全靠内置约束兜底：v4 限 /16、v6 限 /112、速率上限 10000pps、墙钟超时保留部分结果。
 >   CLI 细节以 masscan(8) man page 为准：`--banners`（复数）、`-e IFNAME`（无 --interface）、UDP 用 `U:` 端口前缀（无 -sU）。
 >   待办：回内网后 Kali 上 live 验证 + 部署（masscan 需 `apt install masscan`）。
+> - 2026-09-07 ✅ P0-1 Web 侦察管线完成（新模块 `recon.py`：subfinder_scan / httpx_probe / dnsx_lookup，
+>   🟡 门控，70 个新测试，451 全绿）。CLI 以 projectdiscovery **main 分支 Go 源码**为 ground truth，
+>   抓出 4 个文档级坑：① subfinder JSONL 用 `host` 键（旧文档写 `domain`，解析双兼容）；② httpx 标题/技术栈
+>   字段只有在传 `--title`/`--tech-detect` 时才出现在 JSON 里；③ dnsx `--timeout` 是 Go duration（传 `"10s"`）；
+>   ④ dnsx 的 `--chaos`/`--safe` 已在 main 移除（代码与测试均断言其不存在）。httpx 目标走 **stdin**（无 -u/-l 时
+>   `fileutil.HasStdin()` 生效），避免长列表 argv 溢出。
+>   待办：回内网后 Kali 上 `apt install subfinder httpx dnsx` + live 验证（subfinder 需公网 OSINT 源可达）。
 
 ## 一、缺口盘点（对照 2026 竞品）
 
@@ -31,12 +38,12 @@
 
 ## 三、P0 — 快速补链（约 1 周，69 → 80 工具）
 
-### P0-1 Web 侦察管线：subfinder + httpx + dnsx（1 天，🟡）
+### P0-1 Web 侦察管线：subfinder + httpx + dnsx（1 天，🟡，✅ 已完成）
 - `subfinder_scan` 被动子域发现（60+ 源，零主动流量）
 - `httpx_probe` 存活 web 服务批量探测（status/title/技术栈/端口）
-- `dnsx_lookup` 批量 DNS 记录发现（A/AAAA/MX/TXT）
-- 补：web 攻击面入口
-- 依赖：Kali 仓库三件套（aarch64 确认版本，太旧装官方 release 二进制）
+- `dnsx_lookup` 批量 DNS 记录发现（A/AAAA/MX/TXT，内网 IP 提示）
+- 补：web 攻击面入口（subfinder → dnsx → httpx → nuclei/ffuf 全管线）
+- 依赖：Kali 仓库三件套（已加入 setup.sh PENTEST_PKGS；aarch64 版本待回内网确认，太旧装官方 release 二进制）
 
 ### P0-2 快扫：masscan（0.5 天，✅ 已完成 — 定为 🟢 与 nmap_scan 同级）
 - `masscan_scan`：目标（v4≤/16、v6≤/112 硬约束）+ 端口（支持 `T:`/`U:` 前缀）+ 速率（默认 100、上限 10000pps）+ banner + 接口（`-e`）+ 超时（默认 120s、上限 600s，保留部分结果）

@@ -172,6 +172,15 @@ if _pentest_enabled:
 
         logger.info("Vulnscan tools: %d registered", len(VULNSCAN_TOOLS))
 
+        # Web recon pipeline (projectdiscovery trio; same guard as pentest)
+        from kali_mcp.recon import RECON_TOOLS
+
+        for _name, (_func, _model) in RECON_TOOLS.items():
+            _register_tool_with_model(_name, _func, _model)
+            logger.info("Registered recon tool: %s", _name)
+
+        logger.info("Recon tools: %d registered", len(RECON_TOOLS))
+
         # IPv6 active recon tools (same guard as pentest)
         from kali_mcp.ipv6 import IPV6_PENTEST_TOOLS
 

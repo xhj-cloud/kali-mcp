@@ -123,6 +123,9 @@ PENTEST_PKGS=(
     hydra
     nuclei
     ffuf
+    subfinder       # subfinder_scan — 被动子域发现
+    httpx           # httpx_probe — web 服务存活探测
+    dnsx            # dnsx_lookup — 批量 DNS 记录
     dnsrecon
     snmp
     onesixtyone
