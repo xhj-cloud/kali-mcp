@@ -389,12 +389,14 @@ async def ffuf_fuzz(params: FfufInput) -> str:
     Requires: ffuf (sudo apt install ffuf -y)
     """
     executor = get_executor(timeout=params.max_time + 30)
+    # No -c: forced color escapes (ANSI) would be captured into the
+    # report text even though the output is a pipe, corrupting the
+    # finding lines. ffuf auto-disables color for non-TTY output.
     cmd = [
         "ffuf",
         "-u", params.url,
         "-w", params.wordlist,
         "-ac",                  # Auto-calibrate filter
-        "-c",                   # Colorized (harmless in pipe)
         "-t", str(params.threads),
         "-maxtime", str(params.max_time),
         "-mc", params.match_codes,
@@ -403,9 +405,11 @@ async def ffuf_fuzz(params: FfufInput) -> str:
 
     if params.mode == "vhost":
         cmd.extend(["-H", "Host: FUZZ"])
-        # For vhost mode, use a subdomain wordlist as default
+        # For vhost mode, use a subdomain wordlist as default.
+        # (cmd[4] is the wordlist path; cmd[3] is the -w flag itself —
+        # overwriting it silently dropped the wordlist flag.)
         if params.wordlist == "/usr/share/wordlists/dirb/common.txt":
-            cmd[3] = "/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt"
+            cmd[4] = "/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt"
 
     if params.mode == "post":
         cmd.extend(["-X", "POST", "-d", "FUZZ=test"])
@@ -420,16 +424,27 @@ async def ffuf_fuzz(params: FfufInput) -> str:
     timeout = params.max_time + 15
     result = await executor.run(cmd, timeout=timeout)
 
-    # ffuf outputs to stderr by default (progress) and stdout for JSON
-    # Parse stderr for the summary table
-    output = result.stderr if result.stderr else result.stdout
+    # ffuf (v2, -noninteractive) writes the finding lines
+    # ("GET /path [Status: 200, ...]") to STDOUT; the banner and progress
+    # ticks go to STDERR. Parse the combined stream — searching stderr
+    # alone misses EVERY result, because stderr is never empty (the banner
+    # is always printed). Regression fixed 2026-09-09: known-existing
+    # paths were reported as "not found" on every target.
+    output = (result.stdout or "") + "\n" + (result.stderr or "")
 
     # Count results
     findings = []
     for line in output.split("\n"):
-        # ffuf stderr format: "GET /path [Status: 200, Size: 1234, ...]"
-        if "Status:" in line and "Words:" not in line:
-            findings.append(line.strip())
+        # ffuf result format (v2, live-verified 2026-09-09):
+        #   "GET /admin [Status: 200, Size: 1234, Words: 56, Lines: 10, ...]"
+        #   "login      [Status: 200, Size: 5467, Words: 1855, ...]"  (dir mode)
+        # The bracketed "[Status:" marker is unique to result lines — the
+        # old `"Words:" not in line` filter dropped EVERY real finding,
+        # because result lines always contain a Words: count.
+        # Strip ANSI escapes in case color ever leaks in.
+        clean = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", line).strip()
+        if "[Status:" in clean:
+            findings.append(clean)
 
     if not findings:
         return (
@@ -450,12 +465,17 @@ async def ffuf_fuzz(params: FfufInput) -> str:
     ]
 
     for finding in findings[:50]:
-        m = re.search(
-            r"(\w+)\s+(\S+).*?Status:\s*(\d+).*?Size:\s*(\d+)",
+        # Handles both result shapes:
+        #   "GET /admin [Status: 200, Size: 1234, ...]"  (method present)
+        #   "login    [Status: 200, Size: 5467, ...]"    (dir mode: value only)
+        m = re.match(
+            r"^\s*(?:(\w+)\s+)?(\S+)\s*\[Status:\s*(\d+)(?:.*?Size:\s*(\d+))?",
             finding,
         )
         if m:
-            method, path, code, size = m.group(1), m.group(2), m.group(3), m.group(4)
+            method = m.group(1) or "GET"
+            path, code = m.group(2), m.group(3)
+            size = m.group(4) or "?"
             lines.append(f"| {method} | `{path}` | {code} | {size}B |")
         else:
             lines.append(f"| ? | {finding[:80]} | ? | ? |")

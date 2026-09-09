@@ -487,13 +487,13 @@ sudo nmcli connection up "有线连接 1"
 | 4 | `dig_query` | dig | 🟢 | DNS 查询 (A/AAAA/MX/NS/TXT...) |
 | 5 | `whois_lookup` | whois | 🟢 | 域名/IP 注册信息 |
 | 6 | `nmap_scan` | nmap | 🟢 | 端口/服务/OS 扫描 (7 模式) |
-| 7 | `masscan_scan` | masscan | 🟢 | 高速端口扫描（千端口/秒级，T:/U: 协议前缀，v4≤/16、v6≤/112 限制） |
+| 7 | `masscan_scan` | masscan | 🟢 | 高速端口扫描（千端口/秒级，T:/U: 协议前缀，v4≤/16、v6≤/112 限制；**TUN/Tailscale/WireGuard 接口上不可用，自动告警**） |
 | 8 | `arp_scan` | arp-scan | 🟢 | ARP 设备发现 + MAC 厂商 |
 | 9 | `network_connections` | ss | 🟢 | 监听端口 + 活跃连接 |
 | 10 | `network_interfaces` | ip addr | 🟢 | 网卡 IP + 流量统计 |
 | 11 | `routing_table` | ip route | 🟢 | 内核路由表 |
 | 12 | `tcpdump_capture` | tcpdump | 🟢 | 实时抓包 (BPF 过滤) |
-| 13 | `http_request` | curl | 🟢 | HTTP 请求测试 |
+| 13 | `http_request` | curl | 🟢 | HTTP 请求测试（响应头 + 状态码 + body，可验证 Set-Cookie/认证状态） |
 | 14 | `network_diff` | arp-scan | 🟢 | 设备变更检测（对比快照） |
 | 15 | `traffic_stats` | tcpdump | 🟢 | 实时流量统计（Top IP/协议/端口） |
 | 16 | `port_monitor` | nmap | 🟢 | 端口状态监控（开/关变化追踪） |
@@ -517,7 +517,7 @@ sudo nmcli connection up "有线连接 1"
 | 34 | `enum4linux_scan` | enum4linux | 🟡 | SMB 用户/共享/OS 枚举 |
 | 35 | `whatweb_scan` | whatweb | 🟡 | Web 技术栈指纹 |
 | 36 | `searchsploit` | searchsploit | 🟡 | Exploit-DB 离线搜索 |
-| 37 | `hydra_brute` | hydra | 🟡 | 服务密码爆破 |
+| 37 | `hydra_brute` | hydra | 🟡 | 服务密码爆破（rdp 模块对 xrdp 易误报，输出自带警告） |
 | 38 | `http_load_test` | ab | 🟡 | HTTP 压测（QPS/延迟分位，有上限） |
 | 39 | `nuclei_scan` | nuclei | 🟡 | 模板化漏洞扫描 (3000+ CVE) |
 | 40 | `nuclei_results` | cat | 🟡 | 读取后台 nuclei 扫描结果 |
@@ -1119,13 +1119,13 @@ sudo nmcli connection up "Wired connection 1"
 | 4 | `dig_query` | dig | 🟢 | DNS queries (A/AAAA/MX/NS/TXT…) |
 | 5 | `whois_lookup` | whois | 🟢 | Domain/IP registration info |
 | 6 | `nmap_scan` | nmap | 🟢 | Port/service/OS scan (7 modes) |
-| 7 | `masscan_scan` | masscan | 🟢 | High-speed port scan (thousands of ports/s, T:/U: protocol prefixes, v4≤/16 & v6≤/112 target limits) |
+| 7 | `masscan_scan` | masscan | 🟢 | High-speed port scan (thousands of ports/s, T:/U: protocol prefixes, v4≤/16 & v6≤/112 target limits; **not reliable over TUN/Tailscale/WireGuard interfaces — auto-warns**) |
 | 8 | `arp_scan` | arp-scan | 🟢 | ARP device discovery + MAC vendors |
 | 9 | `network_connections` | ss | 🟢 | Listening ports + active connections |
 | 10 | `network_interfaces` | ip addr | 🟢 | NIC IPs + traffic counters |
 | 11 | `routing_table` | ip route | 🟢 | Kernel routing table |
 | 12 | `tcpdump_capture` | tcpdump | 🟢 | Live packet capture (BPF filters) |
-| 13 | `http_request` | curl | 🟢 | HTTP request testing |
+| 13 | `http_request` | curl | 🟢 | HTTP request testing (full response headers + status code + body; Set-Cookie visible) |
 | 14 | `network_diff` | arp-scan | 🟢 | Device change detection (vs snapshot) |
 | 15 | `traffic_stats` | tcpdump | 🟢 | Live traffic stats (top IPs/protocols/ports) |
 | 16 | `port_monitor` | nmap | 🟢 | Port-state monitoring (track open/closed changes) |
@@ -1149,7 +1149,7 @@ sudo nmcli connection up "Wired connection 1"
 | 34 | `enum4linux_scan` | enum4linux | 🟡 | SMB user/share/OS enumeration |
 | 35 | `whatweb_scan` | whatweb | 🟡 | Web tech-stack fingerprinting |
 | 36 | `searchsploit` | searchsploit | 🟡 | Offline Exploit-DB search |
-| 37 | `hydra_brute` | hydra | 🟡 | Service password brute-force |
+| 37 | `hydra_brute` | hydra | 🟡 | Service password brute-force (rdp module false-positives on xrdp — warning included) |
 | 38 | `http_load_test` | ab | 🟡 | HTTP load test (QPS/latency percentiles, capped) |
 | 39 | `nuclei_scan` | nuclei | 🟡 | Template-based vuln scanning (3000+ CVEs) |
 | 40 | `nuclei_results` | cat | 🟡 | Read background nuclei scan results |

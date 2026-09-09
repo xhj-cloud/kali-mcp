@@ -916,15 +916,23 @@ async def http_request(params: CurlInput) -> str:
     and request bodies (multi-field form POSTs with '&' included —
     curl is invoked without a shell, so payload metacharacters are safe).
 
-    Redirects are NOT followed by default (raw status/headers are what
-    probes need; method-preserving 307 loops hang curl -L). Set
-    follow_redirects=true for final-page fetches.
+    The response includes the full HTTP header section (status line,
+    Server, Set-Cookie, ...) followed by the body, so status codes and
+    session cookies are visible. Without headers the agent cannot tell a
+    401 from a 200 and session-based auth testing is impossible
+    (regression fixed 2026-09-09: a 401 was reported as "✓ Success").
 
-    Equivalent to: curl -s -X {method} [--connect-timeout T] -H '...' -d '...' {url}
+    Redirects are NOT followed by default (method-preserving 307 loops
+    hang curl -L). Set follow_redirects=true for final-page fetches.
+
+    Equivalent to: curl -s -i -X {method} [--connect-timeout T] -H '...' -d '...' {url}
 
     Requires: curl (pre-installed on Kali)
     """
-    cmd = ["curl", "-s", "-X", params.method]
+    # -i keeps the full response headers in the output. Without it curl -s
+    # returns only the body: the status code and Set-Cookie are invisible,
+    # and auth failures (401/403) are indistinguishable from success.
+    cmd = ["curl", "-s", "-i", "-X", params.method]
 
     if params.follow_redirects:
         cmd.append("-L")
@@ -1370,6 +1378,22 @@ def _parse_masscan_found(stdout: str) -> list[tuple[str, int]]:
     return found
 
 
+def _is_tun_interface(dev: str) -> bool:
+    """True if *dev* is a TUN/TAP device (ARPHRD_TUN=65534 / ARPHRD_TAP=65535).
+
+    Covers Tailscale, WireGuard and most VPN interfaces, on which
+    masscan's raw-SYN scans silently find nothing. Live-verified
+    2026-09-09: tailscale0 reports /sys/class/net/tailscale0/type = 65534.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9_.@-]+", dev or ""):
+        return False  # not a plausible interface name; never build a path
+    try:
+        with open(f"/sys/class/net/{dev}/type", encoding="ascii") as fh:
+            return fh.read().strip() in ("65534", "65535")
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
 def _clean_masscan_stderr(stderr: str) -> str:
     """Collapse masscan's progress ticks to their final value.
 
@@ -1428,6 +1452,12 @@ async def masscan_scan(params: MasscanInput) -> str:
     - probe rate capped at 10000 pps (default 100)
     - wall-clock timeout; partial results are kept on timeout
 
+    ⚠️ NOT reliable through TUN-backed interfaces (Tailscale, WireGuard,
+    VPNs): masscan's raw-SYN packets do not work on TUN devices and the
+    scan silently reports zero ports (live-verified 2026-09-09: nmap saw
+    8/8 open ports on a Tailscale target, masscan — even as root — found
+    0). Use nmap_scan for such targets.
+
     Use cases:
     - Quick open-port sweep of a /24 or /16
     - Find which hosts in a range answer on web ports
@@ -1449,6 +1479,26 @@ async def masscan_scan(params: MasscanInput) -> str:
     cmd.append(params.target)
 
     executor = get_executor(timeout=params.timeout)
+
+    # Best-effort TUN detection: if traffic to the target routes through a
+    # TUN device, masscan cannot work there and an empty result must not be
+    # presented as a clean scan. Never blocks the scan itself.
+    tun_warning = ""
+    try:
+        probe = params.target.split("/")[0]
+        route_res = await executor.run(["ip", "route", "get", probe], timeout=10)
+        m = re.search(r"\bdev (\S+)", route_res.stdout or "")
+        if m and _is_tun_interface(m.group(1)):
+            tun_warning = (
+                "> ⚠️ **masscan 对 TUN 虚拟接口不可用**：目标 "
+                f"`{probe}` 经 TUN 接口 `{m.group(1)}`（Tailscale/WireGuard/VPN）路由，"
+                "masscan 的 raw-SYN 扫描在此类接口上会静默抓不到任何端口"
+                "（2026-09-09 实测：同一目标 nmap 8/8 端口全开，masscan 即使 root 也 found=0）。"
+                "请改用 `nmap_scan` 扫描该目标，本次结果**不能**作为“无开放端口”的证据。\n\n"
+            )
+    except Exception:
+        pass
+
     result = await executor.run(cmd, timeout=params.timeout)
     if result.stderr:
         result.stderr = _clean_masscan_stderr(result.stderr)
@@ -1458,7 +1508,14 @@ async def masscan_scan(params: MasscanInput) -> str:
     if found:
         out += "\n" + _masscan_output_summary(found)
     elif result.success:
-        out += "\n\n_(扫描完成 — 未发现开放端口)_"
+        out += "\n"
+        if tun_warning:
+            out += tun_warning
+        out += "_(扫描完成 — 未发现开放端口)_"
+        if not tun_warning:
+            out += (
+                "\n\n> 提示：空结果不等于干净 — 建议用 `nmap_scan`（同端口列表）交叉验证。"
+            )
     return out
 
 
