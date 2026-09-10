@@ -1,12 +1,12 @@
 # 🔍 Kali MCP Server
 
-> 将 Kali Linux 变成你的 AI 网络助手 —— 94 个工具，从网络维护到 AD 横向，对话即操作。
-> Turn Kali Linux into your AI network assistant — 94 tools, from network maintenance to AD lateral movement. Talk is the command.
+> 将 Kali Linux 变成你的 AI 网络助手 —— 95 个工具，从网络维护到 AD 横向，对话即操作。
+> Turn Kali Linux into your AI network assistant — 95 tools, from network maintenance to AD lateral movement. Talk is the command.
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
 [![FastMCP](https://img.shields.io/badge/FastMCP-3.4+-green.svg)](https://gofastmcp.com)
 [![License](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightblue.svg)](LICENSE)
-[![Tools](https://img.shields.io/badge/Tools-94-orange.svg)]()
+[![Tools](https://img.shields.io/badge/Tools-95-orange.svg)]()
 
 **[English](#english)** | **[简体中文](#简体中文)**
 
@@ -190,8 +190,8 @@ grep -E "PENTEST_ENABLED|ATTACK_ENABLED" .env
 | PENTEST | ATTACK | 工具数 |
 |:---:|:---:|:---:|
 | false | false | 30（仅网络维护） |
-| true | false | 56（+渗透侦察 + MSF 侦察） |
-| true | true | 94（+主动攻击 + MSF 桥 + 文件传输） |
+| true | false | 57（+渗透侦察 + MSF 侦察） |
+| true | true | 95（+主动攻击 + MSF 桥 + 文件传输） |
 
 ### 4. 启动
 
@@ -350,9 +350,9 @@ curl http://<Kali-IP>:8000/mcp
 
 `snmp-check` 不在 Kali apt 仓库。已改用 `snmpwalk`（`apt install snmp`）替代，无需额外安装。
 
-### 工具数量不对（30 个 vs 94 个）
+### 工具数量不对（30 个 vs 95 个）
 
-**现象：** 两台虚拟机工具数不同，一台 30 个，一台 94 个。
+**现象：** 两台虚拟机工具数不同，一台 30 个，一台 95 个。
 
 **原因：** `.env` 中 `PENTEST_ENABLED` 和 `ATTACK_ENABLED` 为 `false`，渗透和攻击工具未加载。
 
@@ -361,8 +361,8 @@ curl http://<Kali-IP>:8000/mcp
 | 配置 | 工具数 |
 |------|------|
 | 两个都 `false` | 30（16 网络 + 4 监视 + 10 IPv6） |
-| `PENTEST=true` | 56（+8 渗透 + 6 挖洞 + 4 Web 侦察 + 2 IPv6 渗透 + 3 AD 枚举 + 3 MSF 侦察） |
-| 两个都 `true` | 94（+24 攻击 + 4 AD 攻击 + 6 MSF 攻击 + 4 文件传输） |
+| `PENTEST=true` | 57（+8 渗透 + 6 挖洞 + 4 Web 侦察 + 2 IPv6 渗透 + 3 AD 枚举 + 4 MSF 侦察） |
+| 两个都 `true` | 95（+24 攻击 + 4 AD 攻击 + 6 MSF 攻击 + 4 文件传输） |
 
 **解决：**
 
@@ -570,11 +570,12 @@ sudo nmcli connection up "有线连接 1"
 | 87 | `msf_sessions` | msfrpcd RPC | 🔴 | 列出活跃 meterpreter/shell 会话 |
 | 88 | `msf_session_exec` | msfrpcd RPC | 🔴 | 在会话内执行 meterpreter/shell 命令 |
 | 89 | `msf_kill_session` | msfrpcd RPC (session.stop) | 🔴 | 结束活跃会话（int/uuid 均可，meterpreter/shell 通吃） |
-| 90 | `msf_job_info` | msfrpcd RPC (job.info) | 🟡 | 读取运行中 msf 作业的中间输出（job 表仅内存，完成即移除） |
-| 91 | `file_upload` | scp + sshpass -e | 🔴 | 本地文件上传目标（密码走 SSHPASS env 不落 argv） |
-| 92 | `file_download` | scp + sshpass -e | 🔴 | 目标文件下载到 Kali（拒绝覆盖已存在本地文件） |
-| 93 | `file_read` | 本地读取 | 🔴 | 读 Kali 文件（64KiB 上限，二进制只给 hexdump 头部） |
-| 94 | `file_delete` | 本地删除 | 🔴 | 删 Kali 普通文件（须 confirm=yes，拒目录/符号链接） |
+| 90 | `msf_job_info` | msfrpcd RPC (job.info) | 🟡 | 读取运行中 msf 作业的元数据（模块/启动时间/datastore 快照）；job 表仅存运行中作业，完成即移除，已完成作业的输出用 `msf_log` 读 |
+| 91 | `msf_log` | 日志文件 / journald | 🟡 | 读取 msfrpcd 模块输出日志（ssh_login 成功/失败行、扫描结果、exploit 横幅；filter 过滤 + 尾部行数，文件优先 journal 兜底） |
+| 92 | `file_upload` | scp + sshpass -e | 🔴 | 本地文件上传目标（密码走 SSHPASS env 不落 argv） |
+| 93 | `file_download` | scp + sshpass -e | 🔴 | 目标文件下载到 Kali（拒绝覆盖已存在本地文件） |
+| 94 | `file_read` | 本地读取 | 🔴 | 读 Kali 文件（64KiB 上限，二进制只给 hexdump 头部） |
+| 95 | `file_delete` | 本地删除 | 🔴 | 删 Kali 普通文件（须 confirm=yes，拒目录/符号链接） |
 
 ---
 
@@ -821,8 +822,8 @@ grep -E "PENTEST_ENABLED|ATTACK_ENABLED" .env
 | PENTEST | ATTACK | Tools |
 |:---:|:---:|:---:|
 | false | false | 30 (maintenance only) |
-| true | false | 56 (+ pentest recon + MSF recon) |
-| true | true | 94 (+ active attack + MSF bridge + file transfer) |
+| true | false | 57 (+ pentest recon + MSF recon) |
+| true | true | 95 (+ active attack + MSF bridge + file transfer) |
 
 ### 4. Start
 
@@ -981,9 +982,9 @@ curl http://<Kali-IP>:8000/mcp
 
 `snmp-check` is not in Kali's apt repository. `snmpwalk` (from `apt install snmp`) is used instead — no extra install needed.
 
-### Wrong tool count (30 vs 94)
+### Wrong tool count (30 vs 95)
 
-**Symptom:** two VMs show different tool counts — one 30, the other 94.
+**Symptom:** two VMs show different tool counts — one 30, the other 95.
 
 **Cause:** `PENTEST_ENABLED` and `ATTACK_ENABLED` are `false` in `.env`, so pentest and attack tools never loaded.
 
@@ -992,8 +993,8 @@ curl http://<Kali-IP>:8000/mcp
 | Config | Tools |
 |------|------|
 | both `false` | 30 (16 network + 4 monitor + 10 IPv6) |
-| `PENTEST=true` | 56 (+8 pentest +6 vuln +4 web recon +2 IPv6 pentest +3 AD enum +3 MSF recon) |
-| both `true` | 94 (+24 attack +4 AD attack +6 MSF attack +4 file transfer) |
+| `PENTEST=true` | 57 (+8 pentest +6 vuln +4 web recon +2 IPv6 pentest +3 AD enum +4 MSF recon) |
+| both `true` | 95 (+24 attack +4 AD attack +6 MSF attack +4 file transfer) |
 
 **Fix:**
 
@@ -1109,7 +1110,7 @@ sudo nmcli connection up "Wired connection 1"
 
 ---
 
-## Full Tool List (94)
+## Full Tool List (95)
 
 | # | Tool | Kali command | Tier | Function |
 |---|--------|-----------|------|------|
@@ -1202,11 +1203,12 @@ sudo nmcli connection up "Wired connection 1"
 | 87 | `msf_sessions` | msfrpcd RPC | 🔴 | List active meterpreter/shell sessions |
 | 88 | `msf_session_exec` | msfrpcd RPC | 🔴 | Run meterpreter/shell commands inside a session |
 | 89 | `msf_kill_session` | msfrpcd RPC (session.stop) | 🔴 | Terminate an active session (int/uuid, meterpreter/shell) |
-| 90 | `msf_job_info` | msfrpcd RPC (job.info) | 🟡 | Read mid-run output of a running msf job (job table is in-memory; removed on completion) |
-| 91 | `file_upload` | scp + sshpass -e | 🔴 | Upload a local file to a target (password via SSHPASS env, never argv) |
-| 92 | `file_download` | scp + sshpass -e | 🔴 | Download a target file to Kali (refuses to overwrite an existing local file) |
-| 93 | `file_read` | local read | 🔴 | Read a file on Kali (64 KiB cap, binary → hexdump head only) |
-| 94 | `file_delete` | local delete | 🔴 | Delete a regular file on Kali (requires confirm=yes, refuses dirs/symlinks) |
+| 90 | `msf_job_info` | msfrpcd RPC (job.info) | 🟡 | Read metadata of a running msf job (module/start time/datastore snapshot); the job table keeps running jobs only — completed output goes to `msf_log` |
+| 91 | `msf_log` | log file / journald | 🟡 | Read msfrpcd module output log (ssh_login lines, scan results, exploit banners; filter + tail lines, file-first with journald fallback) |
+| 92 | `file_upload` | scp + sshpass -e | 🔴 | Upload a local file to a target (password via SSHPASS env, never argv) |
+| 93 | `file_download` | scp + sshpass -e | 🔴 | Download a target file to Kali (refuses to overwrite an existing local file) |
+| 94 | `file_read` | local read | 🔴 | Read a file on Kali (64 KiB cap, binary → hexdump head only) |
+| 95 | `file_delete` | local delete | 🔴 | Delete a regular file on Kali (requires confirm=yes, refuses dirs/symlinks) |
 
 ---
 

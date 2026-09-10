@@ -172,6 +172,20 @@ _msfrpcd_setup() {
         echo -e "  msfrpcd password ${CYAN}generated${NC} into .env (MSF_RPC_PASSWORD)"
     fi
     # 2) systemd unit (loopback-only, no DB, no SSL, foreground)
+    #
+    # stdout/stderr → log FILE (not the journal): all module print_*
+    # output (login lines, scan results, exploit banners) goes to
+    # stdout, and the journal stream for it has been observed DEAD on
+    # Kali (verified 2026-09-10: writes to the process's fd 1 vanish,
+    # only the stderr stream survives). A real file is reliable; the
+    # msf_log MCP tool tails it.
+    $SUDO install -d -m 755 /var/log/metasploit-framework
+    # module print output capture: under msfrpcd, modules have
+    # user_output == nil, so the framework silently discards every
+    # print_* (verified 2026-09-10). This RUBYOPT preload injects a
+    # file-backed LocalOutput into Msf::Simple.{run,exploit}_simple.
+    $SUDO install -m 644 "$SCRIPT_DIR/msfrpcd/kali_msf_log_patch.rb" \
+        /usr/local/lib/kali_msf_log_patch.rb
     $SUDO tee /etc/systemd/system/msfrpcd.service > /dev/null <<MSFRPCD
 [Unit]
 Description=Metasploit RPC daemon (msfrpcd) for kali-mcp
@@ -182,8 +196,11 @@ Type=simple
 User=root
 WorkingDirectory=/usr/share/metasploit-framework
 Environment=HOME=/root
+Environment=RUBYOPT=-r/usr/local/lib/kali_msf_log_patch
 EnvironmentFile=-$SCRIPT_DIR/.env
 ExecStart=/usr/bin/msfrpcd -f -n -S -a 127.0.0.1 -p 55553 -U msf -P \${MSF_RPC_PASSWORD}
+StandardOutput=append:/var/log/metasploit-framework/msfrpcd.log
+StandardError=append:/var/log/metasploit-framework/msfrpcd.log
 Restart=on-failure
 RestartSec=5
 

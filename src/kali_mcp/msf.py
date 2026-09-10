@@ -6,9 +6,11 @@ Closes the "find vulnerability → exploit → get shell → command" loop:
   → msf_jobs / msf_sessions → msf_session_exec (meterpreter/shell commands)
 
 Gating:
-  🟡 PENTEST_ENABLED=true  — msf_search, msf_show_opts (read-only)
+  🟡 PENTEST_ENABLED=true  — msf_search, msf_show_opts, msf_job_info,
+                             msf_log (read-only)
   🔴 ATTACK_ENABLED=true   — msf_run_exploit, msf_jobs, msf_stop_job,
-                             msf_sessions, msf_session_exec
+                             msf_sessions, msf_kill_session,
+                             msf_session_exec
 
 Implementation: pymetasploit3 (Kali apt: python3-pymetasploit3, the
 DanMcInerney fork maintained by the Kali team). The client is synchronous
@@ -52,6 +54,31 @@ python3-pymetasploit3 1.0.3+git20250715, 2026-09-07):
   - shell: 'session.shell_write' + poll 'session.shell_read'.
   - Payload naming is linux/aarch64/* (NOT arm64); msfvenom -f elf for a
     directly executable binary (raw shellcode cannot be exec'd).
+
+Job-table & log ground truth (live-verified against Kali 6.5.0 msfrpcd
++ framework source, 2026-09-10):
+  - jobs.info(jid) returns METADATA ONLY (jid/name/start_time/datastore)
+    — there is no module-output field, ever. The job table is in-memory
+    and a finished job is deleted the instant it ends (Rex::Job#start
+    ensure block → JobContainer#remove_job, lib/rex/job.rb), so finished
+    and never-existed ids both return {"error_message": "Invalid Job"}.
+    msfconsole behaves the same (jobs shows running only).
+  - Module print_* output (login lines, scan results, exploit banners)
+    goes to the daemon's stdout. Our systemd unit appends stdout+stderr
+    to /var/log/metasploit-framework/msfrpcd.log — the journald stdout
+    stream for the daemon has been observed DEAD on Kali (writes to fd 1
+    vanish; only the stderr stream survives), so the file is the
+    reliable sink. _msf_log reads the file first, falls back to
+    journalctl -u msfrpcd. The MSF Logger file
+    (~/.msf4/logs/framework.log) only carries framework-level
+    [d(0)]/[e(0)] entries — NOT module output.
+  - modules.execute payload key: the server checks ONLY the ALL-CAPS
+    'PAYLOAD' option (lib/msf/core/rpc/v10/rpc_module.rb _run_exploit);
+    a mixed-case 'Payload=...' slips past that check and the handler
+    silently receives the framework default payload (verified:
+    Payload=linux/x64/shell_reverse_tcp → datastore PAYLOAD=
+    windows/meterpreter/reverse_tcp). _execute normalizes both
+    spellings to PAYLOAD and rejects conflicting pairs.
 """
 
 from __future__ import annotations
@@ -59,10 +86,13 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import shutil
+import subprocess
+from datetime import datetime
 
 from pydantic import BaseModel, Field, field_validator
 
-from kali_mcp.tools import _is_valid_target, _no_shell_meta
+from kali_mcp.tools import _is_valid_target, _no_nul_or_newline, _no_shell_meta
 
 # Optional dependency: import at module level so the tool can report a
 # clean "not installed" message at call time instead of crashing import.
@@ -83,9 +113,19 @@ _MSFRPCD_DEFAULT_USER = "msf"
 #: Option names msfrpcd accepts even when a module does not declare them
 #: (framework globals + payload slot). Everything else must be a declared
 #: module option — the server silently ignores unknown names.
+#:
+#: PAYLOAD is a framework global, NOT a module option (live-verified
+#: 2026-09-10: exploit/multi/handler's option list is
+#: ContextInformationFile/DisablePayloadHandler/EnableContextEncoding/
+#: ExitOnSession/ListenerTimeout/VERBOSE/WORKSPACE/WfsDelay — no
+#: PAYLOAD, no LHOST/LPORT either). rpc_module.rb _run_exploit reads
+#: ONLY the ALL-CAPS 'PAYLOAD' key from the datastore; a mixed-case
+#: 'Payload' lands in the datastore under a different key, leaves
+#: 'PAYLOAD' blank and silently falls back to the default payload.
+#: Both spellings are whitelisted here; _execute normalizes to PAYLOAD.
 _GLOBAL_OPTION_WHITELIST = frozenset({
     "RHOST", "RPORT", "LHOST", "LPORT", "LPORT2",
-    "Payload", "AutoRunScript", "Session",
+    "Payload", "PAYLOAD", "AutoRunScript", "Session",
 })
 
 _MODULE_TYPE_RE = re.compile(r"^(exploit|auxiliary|post|payload|encoder|nop)$")
@@ -246,6 +286,20 @@ def _show_opts(client, fullname: str) -> dict:
 def _execute(client, fullname: str, target: str, opts: dict) -> dict:
     mtype, _ = _split_fullname(fullname)
     kwargs = dict(opts)
+    # msfrpcd's _run_exploit checks ONLY the ALL-CAPS 'PAYLOAD' key
+    # (lib/msf/core/rpc/v10/rpc_module.rb) — a mixed-case 'Payload' slips
+    # past that check and the handler silently falls back to the framework
+    # default payload (live-verified 2026-09-10: Payload=
+    # linux/x64/shell_reverse_tcp was replaced by
+    # windows/meterpreter/reverse_tcp in the handler datastore). Normalize
+    # both spellings to PAYLOAD; reject conflicting pairs loudly.
+    if "Payload" in kwargs:
+        if "PAYLOAD" in kwargs and kwargs["PAYLOAD"] != kwargs["Payload"]:
+            raise ValueError(
+                f"选项里同时有 Payload 和 PAYLOAD 且取值不同"
+                f"（{kwargs['Payload']!r} vs {kwargs['PAYLOAD']!r}）——只传一个"
+            )
+        kwargs["PAYLOAD"] = kwargs.pop("Payload")
     # target → RHOST (framework global; harmless for listener modules).
     kwargs.setdefault("RHOST", target)
     result = client.modules.execute(mtype, fullname, **kwargs)
@@ -294,33 +348,134 @@ def _kill_session(client, sid: str) -> tuple:
 
 
 def _job_info(client, job_id: int) -> dict:
-    """Fetch the msfrpcd job record (job.info RPC).
+    """Fetch the msfrpcd job record of a *currently running* job (job.info).
 
-    Completed auxiliary/exploit jobs keep their module result in the job
-    record even after they leave the running list — this is how you read
-    e.g. an ssh_login success line after the job finished.
+    The job table is in-memory and holds ONLY jobs still running: the
+    instant a job ends (success OR failure) Rex::Job#start's ensure block
+    removes it (lib/rex/job.rb — source-verified 2026-09-10). For any
+    absent id — finished or never existed — the RPC returns the same
+    error dict ({"error": true, "error_message": "Invalid Job",
+    "error_code": 500}).
 
-    NOTE: the job table is IN-MEMORY — an msfrpcd restart wipes it. For an
-    unknown id the RPC returns an error dict (live-verified 2026-09-07:
-    {"error": true, "error_message": "Invalid Job", "error_code": 500}).
+    Even for a running job the record is metadata only:
+    jid/name/start_time/datastore. Module stdout never appears in the
+    job record — it flows to the msfrpcd log (see _msf_log / msf_log).
     """
     raw = client.jobs.info(job_id) or {}
     if isinstance(raw, dict) and raw.get("error"):
         msg = raw.get("error_message") or raw.get("error_string") or "未知错误"
         raise LookupError(
-            f"job {job_id} 不存在或记录已被清除（msfrpcd 的 job 表只在内存中，"
-            f"服务重启即丢失）: {msg}"
+            f"job {job_id} 不在 job 表中：msfrpcd 的 job 表只保留*正在运行*的 job——"
+            f"作业结束（无论成功失败）的瞬间就被移除，"
+            f"所以已完成的 job 与从未存在过的 job 表现相同（服务端: {msg}）。"
+            f"已完成 job 的模块输出只存在于 msfrpcd 日志，用 `msf_log` 读取。"
         )
     inner = raw.get("result") if isinstance(raw, dict) else None
     if not isinstance(inner, dict):
         inner = raw if isinstance(raw, dict) else {}
     return {
-        "job_id": inner.get("job_id", job_id),
-        "type": inner.get("type", "?"),
+        "job_id": inner.get("jid", inner.get("job_id", job_id)),
         "name": inner.get("name", "?"),
-        "command": inner.get("command", "?"),
-        "result": inner.get("result"),
+        "start_time": inner.get("start_time"),
+        "datastore": inner.get("datastore") or {},
     }
+
+
+#: Log file the msfrpcd systemd unit appends stdout+stderr to
+#: (StandardOutput=append:/var/log/metasploit-framework/msfrpcd.log).
+#: ALL module print_* output (login lines, scan results, exploit banners)
+#: ends up here. Override via env for custom deployments.
+_MSFRPCD_LOG_FILE = os.getenv(
+    "MSF_RPC_LOG_FILE", "/var/log/metasploit-framework/msfrpcd.log"
+)
+
+#: journald unit fallback (hosts whose unit still streams to the journal).
+_MSFRPCD_LOG_UNIT = os.getenv("MSF_RPC_LOG_UNIT", "msfrpcd")
+
+# short-iso journal line: "2026-09-10T00:54:33+0800 kali msfrpcd[956]: [*] …"
+_JOURNAL_LINE_RE = re.compile(
+    r"^(?P<ts>\S+)\s+(?P<host>\S+)\s+(?P<unit>[^\s\[]+)\[(?P<pid>\d+)\]:\s+(?P<msg>.*)$"
+)
+
+
+def _read_log_tail(path: str, max_bytes: int = 2 * 1024 * 1024) -> str:
+    """Read the last max_bytes of a log file (never loads the whole file)."""
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return ""
+    if size == 0:
+        return ""
+    with open(path, "rb") as f:
+        if size > max_bytes:
+            f.seek(size - max_bytes)
+        data = f.read()
+    text = data.decode("utf-8", errors="replace")
+    if size > max_bytes and "\n" in text:
+        text = text.split("\n", 1)[1]  # drop the partial first line
+    return text
+
+
+def _msf_log(client, filter_text: str, lines: int, minutes: int) -> tuple:
+    """Read module output from the msfrpcd log — file first, journal fallback.
+
+    Our systemd unit appends msfrpcd's stdout+stderr to
+    /var/log/metasploit-framework/msfrpcd.log — that is the only place
+    module print_* output reliably lands: the journald stdout stream for
+    the daemon has been observed DEAD on Kali (verified 2026-09-10:
+    writes to the process's fd 1 vanish; only the stderr stream and
+    Logger-file entries survive). The file lines carry no timestamps, so
+    `minutes` only constrains the journal fallback.
+
+    Returns (rows, source) with source in {"file", "journal"}.
+    """
+    if os.path.isfile(_MSFRPCD_LOG_FILE):
+        text = _read_log_tail(_MSFRPCD_LOG_FILE)
+        if text:
+            needle = filter_text.lower()
+            out = [
+                ln
+                for ln in (raw.strip() for raw in text.splitlines())
+                if ln and (not needle or needle in ln.lower())
+            ]
+            return out[-lines:], "file"
+    # fallback: journald (requires root or `adm` group membership)
+    if shutil.which("journalctl") is None:
+        raise MsfConfigError(
+            "找不到 msfrpcd 日志：日志文件不存在且 journalctl 不可用"
+        )
+    fetch = min(max(lines * 5, 200), 5000)
+    cmd = [
+        "journalctl", "-u", _MSFRPCD_LOG_UNIT, "--no-pager",
+        "-o", "short-iso", "--since", f"-{minutes} minutes", "-n", str(fetch),
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except FileNotFoundError as e:
+        raise MsfConfigError("journalctl 不可用（未安装 systemd/journal）") from e
+    except subprocess.TimeoutExpired as e:
+        raise MsfConnectionError(
+            f"journalctl 读取最近 {minutes} 分钟日志超时"
+        ) from e
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip()
+        if "No entries" in stderr:
+            return [], "journal"
+        raise MsfConnectionError(f"journalctl 失败 (rc={proc.returncode}): {stderr[:200]}")
+    needle = filter_text.lower()
+    out: list[str] = []
+    for raw in (proc.stdout or "").splitlines():
+        # newer systemd prints the sentinel to stdout with rc=0
+        # (live-verified 2026-09-10: rc=0, stdout="-- No entries --")
+        if raw.strip() == "-- No entries --":
+            return [], "journal"
+        m = _JOURNAL_LINE_RE.match(raw)
+        ts = m.group("ts") if m else ""
+        msg = m.group("msg") if m else raw
+        if needle and needle not in msg.lower():
+            continue
+        out.append(f"{ts}  {msg}" if ts else msg)
+    return out[-lines:], "journal"
 
 
 def _sessions(client) -> dict:
@@ -650,6 +805,70 @@ def _jobs_report(jobs: dict) -> str:
     return "\n".join(lines)
 
 
+def _job_info_report(info: dict) -> str:
+    ds = info.get("datastore") or {}
+    if ds:
+        ds_lines = []
+        for k in sorted(ds)[:40]:
+            v = ds[k]
+            if isinstance(v, (list, tuple)):
+                v = ", ".join(str(x) for x in v)
+            ds_lines.append(f"- `{k}`: {v}")
+        if len(ds) > 40:
+            ds_lines.append(f"… 其余 {len(ds) - 40} 项未列出")
+        ds_txt = "\n".join(ds_lines)
+    else:
+        ds_txt = "（无选项快照）"
+    try:
+        start_txt = datetime.fromtimestamp(int(info.get("start_time"))).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+    except (TypeError, ValueError, OSError):
+        start_txt = "?"
+    lines = [
+        f"## 🎯 Metasploit 作业详情 — job {info['job_id']}（运行中）",
+        f"**模块:** `{info['name']}`  |  **启动时间:** {start_txt}",
+        "",
+        "**选项快照 (datastore):**",
+        ds_txt,
+        "",
+        "> ⚠️ 作业记录只有元数据——模块自身的输出（如 ssh_login 成功/失败行、"
+        "扫描结果）从不进入作业记录，用 `msf_log` 从 msfrpcd 日志读取。",
+    ]
+    return "\n".join(lines)
+
+
+def _log_report(params: "MsfLogInput", rows: list[str], source: str = "journal") -> str:
+    filt = f"`{params.filter}`" if params.filter else "（无）"
+    if source == "file":
+        window = f"日志文件 `{_MSFRPCD_LOG_FILE}` 尾部"
+    else:
+        window = f"journal 最近 {params.minutes} 分钟"
+    lines = [
+        "## 📜 Metasploit msfrpcd 日志",
+        f"**来源:** {window}  |  **过滤:** {filt}  |  **命中:** {len(rows)} 行",
+        "",
+    ]
+    if not rows:
+        if params.filter:
+            why = f"没有匹配 `{params.filter}` 的行"
+        elif source == "file":
+            why = "日志文件为空或无匹配——msfrpcd 可能刚重启，或尚未运行过任何作业"
+        else:
+            why = "窗口内没有日志——msfrpcd 可能刚重启，或尚未运行过任何作业"
+        lines.append(f"> ✅ {why}。")
+        return "\n".join(lines)
+    lines.append("```")
+    lines.extend(rows)
+    lines.append("```")
+    lines.append("")
+    lines.append(
+        "> 💡 模块自身的输出只在这里：作业记录只有元数据，且 job 完成即从 job 表移除。"
+        "过滤建议用模块名（如 `ssh_login`）或目标 IP。"
+    )
+    return "\n".join(lines)
+
+
 def _sessions_report(sessions: dict) -> str:
     lines = ["## 🎯 Metasploit 会话", f"**活跃:** {len(sessions)} 个", ""]
     if not sessions:
@@ -748,7 +967,8 @@ class MsfRunExploitInput(BaseModel):
         max_length=1024,
         description=(
             "Additional module options 'KEY=VALUE,KEY2=VALUE2' "
-            "(see msf_show_opts for available keys, e.g. 'Payload=windows/x64/meterpreter/reverse_tcp,LPORT=4444')"
+            "(see msf_show_opts for available keys, e.g. 'Payload=windows/x64/meterpreter/reverse_tcp,LPORT=4444'; "
+            "the payload key accepts both spellings 'Payload' and 'PAYLOAD' — normalized server-side)"
         ),
     )
     timeout: int = Field(
@@ -855,6 +1075,30 @@ class MsfJobInfoInput(BaseModel):
     """Input for msf_job_info."""
 
     job_id: int = Field(..., ge=0, description="Job ID from msf_jobs / msf_run_exploit")
+
+
+class MsfLogInput(BaseModel):
+    """Input for msf_log."""
+
+    filter: str = Field(
+        "",
+        max_length=200,
+        description=(
+            "Case-insensitive substring to keep, e.g. 'ssh_login' or a target IP; "
+            "empty = raw tail of the msfrpcd log"
+        ),
+    )
+    lines: int = Field(
+        100, ge=1, le=1000, description="Max lines to return (last N after filtering)"
+    )
+    minutes: int = Field(
+        60, ge=1, le=1440, description="How far back in the msfrpcd log to search"
+    )
+
+    @field_validator("filter")
+    @classmethod
+    def validate_filter(cls, v: str) -> str:
+        return _no_nul_or_newline(v.strip())
 
 
 # ---------------------------------------------------------------------------
@@ -1069,12 +1313,14 @@ async def msf_kill_session(params: MsfKillSessionInput) -> str:
 
 
 async def msf_job_info(params: MsfJobInfoInput) -> str:
-    """Read a msf job's record — including completed jobs' module output.
+    """Read a *running* msf job's metadata (module, start time, options snapshot).
 
-    The running-job list (msf_jobs) drops finished jobs, but their result
-    (e.g. an ssh_login success line, a scan report) stays in the job
-    record. This tool fetches it, so you can read scanner/exploit output
-    after the job completed.
+    The msfrpcd job table holds only jobs still running: the instant a job
+    ends (success OR failure) it is removed (Rex::Job#start), so a finished
+    job returns 'Invalid Job' — identical to a job that never existed.
+    Even for running jobs the record is metadata only; module output (an
+    ssh_login line, a scan report) flows exclusively to the msfrpcd log —
+    read it with `msf_log`.
     """
     try:
         info = await _rpc(_job_info, params.job_id, timeout=30)
@@ -1083,32 +1329,42 @@ async def msf_job_info(params: MsfJobInfoInput) -> str:
     except LookupError as e:
         return (
             f"## 🎯 Metasploit 作业详情\n\n❌ {e}\n\n"
-            "💡 用 `msf_jobs` 查看当前运行中的 job ID。"
+            "💡 已完成 job 的模块输出用 `msf_log(filter=\"模块名或目标IP\")` 读取；"
+            "用 `msf_jobs` 查看当前运行中的 job。"
         )
     except Exception as e:
         return (
             f"## 🎯 Metasploit 作业详情\n\n"
             f"❌ 读取 job {params.job_id} 失败: {type(e).__name__}: {e}"
         )
-    result = info.get("result")
-    if result is None:
-        result_txt = "（无结果字段——部分模块只向 msfrpcd 日志输出，作业记录里没有正文）"
-    elif isinstance(result, str):
-        result_txt = result if len(result) <= 4000 else result[:4000] + f"\n…（已截断，共 {len(result)} 字符）"
-    else:
-        import json as _json
+    return _job_info_report(info)
 
-        dump = _json.dumps(result, ensure_ascii=False, default=str)
-        result_txt = dump if len(dump) <= 4000 else dump[:4000] + f"\n…（已截断，共 {len(dump)} 字符）"
-    lines = [
-        f"## 🎯 Metasploit 作业详情 — job {info['job_id']}",
-        f"**类型:** {info['type']}  |  **模块:** `{info['command']}`  |  **名称:** {info['name']}",
-        "",
-        "```",
-        result_txt.strip(),
-        "```",
-    ]
-    return "\n".join(lines)
+
+async def msf_log(params: MsfLogInput) -> str:
+    """Tail the msfrpcd log — the only place finished jobs' module output can be read.
+
+    msf job records are metadata-only and finished jobs are deleted from
+    the job table, so module stdout (ssh_login success lines, scan
+    reports, exploit banners) flows exclusively to the msfrpcd log
+    (file /var/log/metasploit-framework/msfrpcd.log; journald unit
+    `msfrpcd` as fallback). Use filter to keep lines matching a module
+    name, target IP, or keyword.
+
+    Read-only. Requires: msfrpcd systemd service (setup.sh writes the
+    log-capturing unit); the MCP service runs as root on our deployment.
+    """
+    try:
+        rows, source = await _rpc(
+            _msf_log, params.filter, params.lines, params.minutes, timeout=45
+        )
+    except (MsfConfigError, MsfConnectionError) as e:
+        return _error_report("msfrpcd 日志", e)
+    except Exception as e:
+        return (
+            f"## 📜 Metasploit msfrpcd 日志\n\n"
+            f"❌ 读取日志失败: {type(e).__name__}: {e}"
+        )
+    return _log_report(params, rows, source)
 
 
 # ---------------------------------------------------------------------------
@@ -1119,6 +1375,7 @@ MSF_PENTEST_TOOLS: dict[str, tuple[callable, type[BaseModel]]] = {
     "msf_search": (msf_search, MsfSearchInput),
     "msf_show_opts": (msf_show_opts, MsfShowOptsInput),
     "msf_job_info": (msf_job_info, MsfJobInfoInput),
+    "msf_log": (msf_log, MsfLogInput),
 }
 
 MSF_ATTACK_TOOLS: dict[str, tuple[callable, type[BaseModel]]] = {

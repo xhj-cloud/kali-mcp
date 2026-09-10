@@ -31,15 +31,19 @@ from kali_mcp.msf import (
     MsfConfigError,
     MsfJobInfoInput,
     MsfKillSessionInput,
+    MsfLogInput,
     MsfRunExploitInput,
     MsfSearchInput,
     MsfSessionExecInput,
     MsfShowOptsInput,
     MsfStopJobInput,
     _coerce_option,
-    _jobs_report,
+    _execute,
     _job_info,
+    _jobs_report,
     _kill_session,
+    _log_report,
+    _msf_log,
     _parse_options,
     _payload_note,
     _run_exploit_report,
@@ -50,6 +54,7 @@ from kali_mcp.msf import (
     msf_job_info,
     msf_jobs,
     msf_kill_session,
+    msf_log,
     msf_search,
     msf_session_exec,
     msf_sessions,
@@ -254,6 +259,7 @@ class TestMsfGating:
             "msf_search",
             "msf_show_opts",
             "msf_job_info",
+            "msf_log",
         }
         for name, (func, model) in MSF_PENTEST_TOOLS.items():
             assert callable(func)
@@ -778,8 +784,54 @@ class TestMsfRunExploitTool:
         )
         assert "Job ID" in out
         kwargs = stub["client"].executed[0][2]
-        assert kwargs["Payload"] == "linux/aarch64/meterpreter_reverse_tcp"
+        # mixed-case 'Payload' is normalized to the ALL-CAPS 'PAYLOAD'
+        # the msfrpcd server actually checks (rpc_module.rb _run_exploit)
+        assert "Payload" not in kwargs
+        assert kwargs["PAYLOAD"] == "linux/aarch64/meterpreter_reverse_tcp"
         assert kwargs["LHOST"] == "127.0.0.1"
+
+    def test_payload_allcaps_passthrough(self, stub):
+        _client(stub, modules=self._db())
+        _run(
+            msf_run_exploit(
+                MsfRunExploitInput(
+                    module="exploit/multi/handler",
+                    target="127.0.0.1",
+                    options="PAYLOAD=windows/x64/meterpreter/reverse_tcp",
+                )
+            )
+        )
+        kwargs = stub["client"].executed[0][2]
+        assert kwargs["PAYLOAD"] == "windows/x64/meterpreter/reverse_tcp"
+
+    def test_payload_conflicting_spelling_rejected(self, stub):
+        _client(stub, modules=self._db())
+        out = _run(
+            msf_run_exploit(
+                MsfRunExploitInput(
+                    module="exploit/multi/handler",
+                    target="127.0.0.1",
+                    options="Payload=linux/x64/shell_reverse_tcp,PAYLOAD=windows/x64/meterpreter/reverse_tcp",
+                )
+            )
+        )
+        assert "同时有 Payload 和 PAYLOAD" in out
+        assert stub["client"].executed == []  # never launched
+
+    def test_payload_conflicting_same_value_ok(self, stub):
+        _client(stub, modules=self._db())
+        _run(
+            msf_run_exploit(
+                MsfRunExploitInput(
+                    module="exploit/multi/handler",
+                    target="127.0.0.1",
+                    options="Payload=linux/x64/shell_reverse_tcp,PAYLOAD=linux/x64/shell_reverse_tcp",
+                )
+            )
+        )
+        kwargs = stub["client"].executed[0][2]
+        assert kwargs["PAYLOAD"] == "linux/x64/shell_reverse_tcp"
+        assert "Payload" not in kwargs
 
     def test_refused_job(self, stub):
         _client(
@@ -968,76 +1020,260 @@ class TestMsfKillSessionTool:
 
 
 # ===================================================================
-# msf_job_info (③-b: read completed job output)
+# msf_job_info (job table = running jobs only, metadata only)
+#
+# Live-verified ground truth (Kali 6.5.0 msfrpcd, 2026-09-10):
+#   - job.info for a RUNNING job returns metadata only:
+#     {jid, name, start_time, datastore} — no module-output field, ever.
+#   - a finished job is deleted from the table the instant it ends
+#     (Rex::Job#start ensure block) → finished and never-existed ids
+#     both return {"error_message": "Invalid Job"}.
 # ===================================================================
 
-JOB_INFO_SSH_LOGIN = {
-    "result": {
-        "job_id": 12,
-        "type": "auxiliary",
-        "command": "auxiliary/scanner/ssh/ssh_login",
-        "name": "SSH Login",
-        "result": "[*] 192.168.0.77:22  xhj:xhj200814 - Login Succeeded",
-    }
+JOB_INFO_RUNNING_HANDLER = {
+    "jid": 14,
+    "name": "exploit/multi/handler",
+    "start_time": 1757527294,
+    "datastore": {
+        "RHOST": "127.0.0.1",
+        "LHOST": "127.0.0.1",
+        "LPORT": 4449,
+        "PAYLOAD": "linux/x64/shell_reverse_tcp",
+    },
 }
 
 
 class TestJobInfoWorker:
-    def test_wraped_result_shape(self, stub):
-        _client(stub, job_info={12: JOB_INFO_SSH_LOGIN})
-        info = _run(msf._rpc(_job_info, 12))
-        assert info["job_id"] == 12
-        assert info["command"] == "auxiliary/scanner/ssh/ssh_login"
-        assert "Login Succeeded" in info["result"]
+    def test_wrapped_running_shape(self, stub):
+        _client(stub, job_info={14: {"result": dict(JOB_INFO_RUNNING_HANDLER)}})
+        info = _run(msf._rpc(_job_info, 14))
+        assert info["job_id"] == 14
+        assert info["name"] == "exploit/multi/handler"
+        assert info["datastore"]["PAYLOAD"] == "linux/x64/shell_reverse_tcp"
 
-    def test_unwrapped_shape(self, stub):
-        _client(stub, job_info={11: {
-            "job_id": 11, "type": "handler",
-            "command": "exploit/multi/handler", "name": "Handler",
-            "result": None,
-        }})
+    def test_unwrapped_running_shape(self, stub):
+        row = dict(JOB_INFO_RUNNING_HANDLER, jid=11, datastore={})
+        _client(stub, job_info={11: row})
         info = _run(msf._rpc(_job_info, 11))
-        assert info["command"] == "exploit/multi/handler"
-        assert info["result"] is None
+        assert info["job_id"] == 11
+        assert info["datastore"] == {}
 
-    def test_unknown_job_error_dict_raises(self, stub):
-        # live-verified: the RPC returns {"error": True, "error_message":
-        # "Invalid Job"} instead of raising
+    def test_finished_or_unknown_job_error_dict_raises(self, stub):
+        # live-verified: the RPC returns an error dict (does not raise);
+        # finished and never-existed ids are indistinguishable
         _client(stub)
         with pytest.raises(LookupError) as ei:
             _run(msf._rpc(_job_info, 99))
-        assert "Invalid Job" in str(ei.value)
-        assert "99" in str(ei.value)
+        msg = str(ei.value)
+        assert "Invalid Job" in msg
+        assert "99" in msg
+        # must explain completion-removal (the old message blamed a
+        # service restart — wrong) and point to msf_log for output
+        assert "正在运行" in msg
+        assert "msf_log" in msg
 
 
 class TestMsfJobInfoTool:
-    def test_happy_path_str_result(self, stub):
-        _client(stub, job_info={12: JOB_INFO_SSH_LOGIN})
-        out = _run(msf_job_info(MsfJobInfoInput(job_id=12)))
-        assert "job 12" in out
-        assert "auxiliary/scanner/ssh/ssh_login" in out
-        assert "Login Succeeded" in out
+    def test_running_job_report(self, stub):
+        _client(stub, job_info={14: dict(JOB_INFO_RUNNING_HANDLER)})
+        out = _run(msf_job_info(MsfJobInfoInput(job_id=14)))
+        assert "exploit/multi/handler" in out
+        assert "`LPORT`: 4449" in out
+        assert "linux/x64/shell_reverse_tcp" in out
+        assert "msf_log" in out  # output lives in the log, hint present
 
-    def test_dict_result_json_dumped(self, stub):
-        _client(stub, job_info={13: {
-            "result": {"job_id": 13, "type": "exploit",
-                       "command": "exploit/multi/handler", "name": "Handler",
-                       "result": {"ok": True, "count": 2}},
-        }})
-        out = _run(msf_job_info(MsfJobInfoInput(job_id=13)))
-        assert '"count": 2' in out
-
-    def test_missing_result_field(self, stub):
-        _client(stub, job_info={11: {
-            "result": {"job_id": 11, "type": "handler",
-                       "command": "exploit/multi/handler", "name": "Handler"},
-        }})
-        out = _run(msf_job_info(MsfJobInfoInput(job_id=11)))
-        assert "无结果字段" in out
-
-    def test_unknown_job(self, stub):
+    def test_unknown_job_points_to_log(self, stub):
         _client(stub)
         out = _run(msf_job_info(MsfJobInfoInput(job_id=99)))
         assert "❌" in out and "99" in out
-        assert "不存在或记录已被清除" in out
+        assert "正在运行" in out
+        assert "msf_log" in out
         assert "msf_jobs" in out
+
+
+# ===================================================================
+# msf_log (module output: log file first, journal fallback)
+#
+# Live-verified 2026-09-10: the journald stdout stream of the msfrpcd
+# daemon is DEAD on Kali (writes to fd 1 vanish), so the systemd unit
+# appends stdout+stderr to a log file; _msf_log reads that file first
+# and falls back to journalctl -u msfrpcd.
+# ===================================================================
+
+_LOG_FILE_OK = (
+    "[*] Started auxiliary scanner (msfrpcd job 17)\n"
+    "[*] 127.0.0.1:22 - Trying username root ...\n"
+    "[!] 127.0.0.1:22 - Login failed for root:badpass\n"
+    "[*] 127.0.0.1:22 - Scanned 1 of 1\n"
+)
+
+_JOURNAL_OK = (
+    "2026-09-10T10:41:34+0800 kali msfrpcd[956]: [*] Started auxiliary scanner (msfrpcd job 13)\n"
+    "2026-09-10T10:41:35+0800 kali msfrpcd[956]: [*] 127.0.0.1:22 - Trying username root ...\n"
+    "2026-09-10T10:41:35+0800 kali msfrpcd[956]: [!] 127.0.0.1:22 - Login failed for root:badpass\n"
+    "2026-09-10T10:41:36+0800 kali msfrpcd[956]: [*] 127.0.0.1:22 - Scanned 1 of 1\n"
+)
+
+
+def _fake_run(stdout: str, rc: int = 0, stderr: str = ""):
+    def _run_cmd(cmd, capture_output=True, text=True, timeout=None):
+        import subprocess as _sp
+
+        return _sp.CompletedProcess(cmd, rc, stdout=stdout, stderr=stderr)
+
+    return _run_cmd
+
+
+@pytest.fixture
+def no_log_file(monkeypatch, tmp_path):
+    """Point the log-file path at a nonexistent file (journal fallback)."""
+    monkeypatch.setattr(
+        msf, "_MSFRPCD_LOG_FILE", str(tmp_path / "does-not-exist.log")
+    )
+    return monkeypatch
+
+
+class TestMsfLogFile:
+    def test_file_first(self, stub, monkeypatch, tmp_path):
+        logf = tmp_path / "msfrpcd.log"
+        logf.write_text(_LOG_FILE_OK)
+        _client(stub)
+        monkeypatch.setattr(msf, "_MSFRPCD_LOG_FILE", str(logf))
+        rows, source = _run(msf._rpc(_msf_log, "", 10, 60))
+        assert source == "file"
+        assert len(rows) == 4
+        assert rows[-1].startswith("[*] 127.0.0.1:22 - Scanned")
+
+    def test_file_filter_case_insensitive(self, stub, monkeypatch, tmp_path):
+        logf = tmp_path / "msfrpcd.log"
+        logf.write_text(_LOG_FILE_OK)
+        _client(stub)
+        monkeypatch.setattr(msf, "_MSFRPCD_LOG_FILE", str(logf))
+        rows, source = _run(msf._rpc(_msf_log, "LOGIN", 100, 60))
+        assert source == "file"
+        assert len(rows) == 1
+        assert "Login failed" in rows[0]
+
+    def test_empty_file_falls_back_to_journal(
+        self, stub, no_log_file, monkeypatch, tmp_path
+    ):
+        logf = tmp_path / "empty.log"
+        logf.write_text("")
+        monkeypatch.setattr(msf, "_MSFRPCD_LOG_FILE", str(logf))
+        _client(stub)
+        monkeypatch.setattr(msf.shutil, "which", lambda _p: "/usr/bin/journalctl")
+        monkeypatch.setattr(msf.subprocess, "run", _fake_run(_JOURNAL_OK))
+        rows, source = _run(msf._rpc(_msf_log, "", 4, 60))
+        assert source == "journal"
+        assert len(rows) == 4
+
+
+class TestMsfLogJournal:
+    def test_tail_and_strip(self, stub, no_log_file):
+        _client(stub)
+        no_log_file.setattr(msf.shutil, "which", lambda _p: "/usr/bin/journalctl")
+        no_log_file.setattr(msf.subprocess, "run", _fake_run(_JOURNAL_OK))
+        rows, source = _run(msf._rpc(_msf_log, "", 4, 60))
+        assert source == "journal"
+        assert len(rows) == 4
+        # journal prefix (host + unit[pid]) stripped, timestamp kept
+        assert rows[-1].startswith("2026-09-10T10:41:36+0800")
+        assert "msfrpcd[956]" not in rows[-1]
+
+    def test_lines_cap_keeps_last(self, stub, no_log_file):
+        _client(stub)
+        no_log_file.setattr(msf.shutil, "which", lambda _p: "/usr/bin/journalctl")
+        no_log_file.setattr(msf.subprocess, "run", _fake_run(_JOURNAL_OK))
+        rows, _ = _run(msf._rpc(_msf_log, "", 2, 60))
+        assert len(rows) == 2
+        assert "Scanned 1 of 1" in rows[-1]
+
+    def test_no_entries_sentinel_on_stdout(self, stub, no_log_file):
+        # live-verified behavior: newer systemd prints the sentinel to
+        # STDOUT with rc=0
+        _client(stub)
+        no_log_file.setattr(msf.shutil, "which", lambda _p: "/usr/bin/journalctl")
+        no_log_file.setattr(
+            msf.subprocess, "run", _fake_run("-- No entries --", rc=0)
+        )
+        rows, source = _run(msf._rpc(_msf_log, "", 50, 60))
+        assert rows == [] and source == "journal"
+
+    def test_no_entries_on_stderr(self, stub, no_log_file):
+        # older systemd: rc=1, sentinel on stderr
+        _client(stub)
+        no_log_file.setattr(msf.shutil, "which", lambda _p: "/usr/bin/journalctl")
+        no_log_file.setattr(
+            msf.subprocess, "run", _fake_run("", rc=1, stderr="-- No entries --")
+        )
+        rows, source = _run(msf._rpc(_msf_log, "", 50, 60))
+        assert rows == [] and source == "journal"
+
+    def test_journalctl_missing(self, stub, no_log_file):
+        _client(stub)
+        no_log_file.setattr(msf.shutil, "which", lambda _p: None)
+        with pytest.raises(MsfConfigError, match="日志"):
+            _run(msf._rpc(_msf_log, "", 50, 60))
+
+    def test_journalctl_hard_error_raises(self, stub, no_log_file):
+        _client(stub)
+        no_log_file.setattr(msf.shutil, "which", lambda _p: "/usr/bin/journalctl")
+        no_log_file.setattr(
+            msf.subprocess, "run", _fake_run("", rc=1, stderr="Permission denied")
+        )
+        with pytest.raises(MsfConnectionError, match="Permission denied"):
+            _run(msf._rpc(_msf_log, "", 50, 60))
+
+
+class TestReadLogTail:
+    def test_reads_full_small_file(self, tmp_path):
+        logf = tmp_path / "a.log"
+        logf.write_text("line1\nline2\n")
+        assert msf._read_log_tail(str(logf)) == "line1\nline2\n"
+
+    def test_missing_file(self, tmp_path):
+        assert msf._read_log_tail(str(tmp_path / "nope.log")) == ""
+
+    def test_large_file_truncates_and_drops_partial_line(self, tmp_path):
+        logf = tmp_path / "big.log"
+        logf.write_bytes(b"X" * 100 + b"\n" + b"tail-line\n")
+        # max_bytes 60 < file size → read from offset, drop partial first
+        text = msf._read_log_tail(str(logf), max_bytes=60)
+        assert text.startswith("\n") or text.startswith("tail-line")
+        assert "tail-line" in text
+        assert not text.startswith("X" * 100)
+
+
+class TestMsfLogTool:
+    def test_report_file_source(self, stub, monkeypatch, tmp_path):
+        logf = tmp_path / "msfrpcd.log"
+        logf.write_text(_LOG_FILE_OK)
+        _client(stub)
+        monkeypatch.setattr(msf, "_MSFRPCD_LOG_FILE", str(logf))
+        out = _run(msf_log(MsfLogInput(filter="login failed", lines=100, minutes=60)))
+        assert "来源:** 日志文件" in out
+        assert "命中:** 1 行" in out
+        assert "Login failed for root:badpass" in out
+
+    def test_report_journal_empty(self, stub, no_log_file):
+        _client(stub)
+        no_log_file.setattr(msf.shutil, "which", lambda _p: "/usr/bin/journalctl")
+        no_log_file.setattr(
+            msf.subprocess, "run", _fake_run("", rc=1, stderr="-- No entries --")
+        )
+        out = _run(msf_log(MsfLogInput()))
+        assert "窗口内没有日志" in out
+
+    def test_report_empty_file_source(self, stub, monkeypatch, tmp_path):
+        logf = tmp_path / "msfrpcd.log"
+        logf.write_text("only-a-startup-line\n")
+        _client(stub)
+        monkeypatch.setattr(msf, "_MSFRPCD_LOG_FILE", str(logf))
+        out = _run(msf_log(MsfLogInput(filter="zzz-no-match", minutes=60)))
+        assert "没有匹配 `zzz-no-match` 的行" in out
+
+    def test_filter_rejects_nul_and_newline(self):
+        with pytest.raises(ValidationError):
+            MsfLogInput(filter="a\nb")
+        with pytest.raises(ValidationError):
+            MsfLogInput(filter="a\x00b")
