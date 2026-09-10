@@ -36,12 +36,25 @@ python3-pymetasploit3 1.0.3+git20250715, 2026-09-07):
     disclosuredate} (no 'desc' field; broad keyword match).
   - modules.use(mtype, mname) → module object; .info dict uses key
     'description' (NOT 'desc'); .optioninfo(name) → {type, required,
-    advanced, evasion, default, enums?, desc}; unknown module raises an
-    internal TypeError ('bool' object is not subscriptable).
+    advanced, evasion, default, enums?, desc}.
+  - UNKNOWN MODULE: MsfModule.__init__ calls module.info + module.options;
+    for a missing module both RPCs return the error dict {'error': True,
+    'error_message': 'Invalid Module', 'error_code': 500, ...} and the
+    library's `for o in self._moptions: self._moptions[o]['required']`
+    crashes on the first key ('error' → True) with the opaque
+    TypeError: 'bool' object is not subscriptable (live-verified
+    2026-09-10). _module_info_raw probes module.info first and turns that
+    into a clean LookupError.
   - modules.execute(mtype, mname, **opts) → {'job_id': int|None,
     'uuid': str|None}. Unknown option names are SILENTLY ignored
     server-side → validate client-side against module options + globals.
-    Missing required option → job_id is None (NO exception).
+    job_id is None (NO exception) whenever exploit_simple bails before the
+    job is registered: Msf::OptionValidateError (missing/invalid option,
+    e.g. reverse payload without LHOST) is caught inside exploit_simple,
+    printed to the module output, then swallowed (return false); generic
+    pre-driver exceptions (unresolvable LHOST, IPv6 LHOST for an IPv4
+    payload) hit its rescue::Exception the same way. The ONLY diagnostic
+    is one line in the msfrpcd log → _launch_failure_line.
   - jobs.list / sessions.list are PROPERTIES (not methods);
     sessions.list keys are native INTS ({6: {...}}), job list keys too.
   - sessions.session(sid) is BROKEN in this package version
@@ -79,6 +92,31 @@ Job-table & log ground truth (live-verified against Kali 6.5.0 msfrpcd
     Payload=linux/x64/shell_reverse_tcp → datastore PAYLOAD=
     windows/meterpreter/reverse_tcp). _execute normalizes both
     spellings to PAYLOAD and rejects conflicting pairs.
+
+Launch-failure ground truth (live-verified against Kali 6.5.0 msfrpcd,
+controlled single-run probes with per-run log deltas, 2026-09-10):
+  - multi/handler with NO options works because Msf::Payload.choose_payload
+    (the fallback when PAYLOAD is absent) has a SIDE EFFECT: for reverse
+    payloads it imports LHOST=Rex::Socket.source_address(RHOST ||
+    '50.50.50.50') into the module datastore (lib/msf/core/payload.rb
+    choose_payload). Verified: no-opts handler bound 192.168.0.225:4444
+    (the egress address).
+  - With an EXPLICIT PAYLOAD that fallback never runs, so a
+    shell/meterpreter payload's required LHOST stays empty →
+    OptionValidateError inside exploit_simple → job_id None. The
+    "works without options / fails with options" asymmetry is this
+    side effect, not the options themselves.
+  - LHOST failure surface (all job_id None + exactly one log line):
+    '192.168' (incomplete IPv4) → server zero-fills to 192.0.0.168,
+    bind fails, handler falls back to 0.0.0.0 (job STILL starts!);
+    unresolvable hostname → 'Exploit failed: getaddrinfo: ...';
+    'localhost' (resolves to ::1 here) → 'Exploit failed: IPv6 address
+    specified for IPv4 payload.'
+  - Countermeasures: _execute auto-fills LHOST with the local egress
+    address for reverse payloads (mirrors choose_payload); msf_run_exploit
+    pre-validates an explicit LHOST (OptAddress mirror, _validate_lhost);
+    on job_id None the report surfaces the newest failure line from the
+    msfrpcd log (_launch_failure_line).
 """
 
 from __future__ import annotations
@@ -87,6 +125,7 @@ import asyncio
 import os
 import re
 import shutil
+import socket
 import subprocess
 from datetime import datetime
 
@@ -262,8 +301,27 @@ def _resolve_fullnames(client, module: str) -> list[str]:
     return matches
 
 
+def _module_info_raw(client, mtype: str, fullname: str) -> dict:
+    """Raw ``module.info`` RPC — existence check before building module objects.
+
+    pymetasploit3's MsfModule.__init__ calls module.info + module.options
+    and iterates over both responses; for a missing module the RPCs return
+    the error dict ``{'error': True, 'error_message': 'Invalid Module',
+    ...}`` and the library's ``self._moptions[o]['required']`` crashes on
+    the first key ('error' → True) with the opaque
+    ``TypeError: 'bool' object is not subscriptable`` (live-verified
+    2026-09-10). Probing module.info first turns that into a clean error.
+    """
+    raw = client.call("module.info", [mtype, fullname])
+    if isinstance(raw, dict) and raw.get("error"):
+        msg = raw.get("error_message") or raw.get("error_string") or "Invalid Module"
+        raise LookupError(f"模块 {fullname} 不存在（服务端: {msg}）")
+    return raw if isinstance(raw, dict) else {}
+
+
 def _show_opts(client, fullname: str) -> dict:
     mtype, _ = _split_fullname(fullname)
+    _module_info_raw(client, mtype, fullname)  # clean error for missing modules
     mod = client.modules.use(mtype, fullname)
     info = mod.info or {}
     opts = {}
@@ -281,6 +339,102 @@ def _show_opts(client, fullname: str) -> dict:
             "desc": str((meta or {}).get("desc") or ""),
         }
     return {"info": info, "options": opts, "required": list(mod.required)}
+
+
+# --- LHOST handling ------------------------------------------------------
+# The framework auto-fills LHOST only on the DEFAULT-payload path
+# (Msf::Payload.choose_payload imports LHOST=<egress address> for reverse
+# payloads, lib/msf/core/payload.rb). With an explicit PAYLOAD that side
+# effect never runs and session payloads (shell_reverse_tcp, meterpreter,
+# ...) fail their required-LHOST validation inside exploit_simple → the
+# RPC returns {"job_id": None} with the only diagnostic in the msfrpcd log
+# (live-verified 2026-09-10). We mirror the framework's behavior below.
+
+#: Looks like a dotted-quad IPv4 (may be malformed, e.g. '192.168').
+_IPV4_LIKE_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){1,3}$")
+#: A fully valid dotted-quad IPv4 (every octet 0-255).
+_STRICT_IPV4_RE = re.compile(
+    r"^((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$"
+)
+
+
+def _egress_address(rhost: str) -> str:
+    """Local IPv4 egress address toward ``rhost`` (UDP connect — no packet sent).
+
+    Python mirror of the framework's ``Rex::Socket.source_address(RHOST ||
+    '50.50.50.50')`` used by Msf::Payload.choose_payload. Falls back to
+    0.0.0.0 when the route cannot be determined.
+    """
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect((rhost or "50.50.50.50", 80))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except OSError:
+        return "0.0.0.0"
+
+
+def _validate_lhost(value: str) -> None:
+    """Client-side mirror of the server's LHOST validation (Msf::OptAddress).
+
+    Server-side validation happens inside exploit_simple, AFTER the RPC is
+    dispatched; a failure there surfaces only as job_id=None plus one log
+    line (live-verified 2026-09-10: '192.168' → zero-filled bind failure;
+    unresolvable host → 'Exploit failed: getaddrinfo'; 'localhost' →
+    'IPv6 address specified for IPv4 payload'). Catch the common bad
+    values here instead.
+    """
+    if not value:
+        raise ValueError("LHOST 不能为空")
+    if _IPV4_LIKE_RE.match(value) and not _STRICT_IPV4_RE.match(value):
+        raise ValueError(
+            f"LHOST={value!r} 不是合法 IPv4 地址（每段必须 0-255；"
+            "不完整的地址会被服务端补零成错误地址，如 '192.168' → 192.0.0.168）"
+        )
+    try:
+        infos = socket.getaddrinfo(value, None)
+    except OSError as e:
+        raise ValueError(f"LHOST={value!r} 无法解析（服务端同样会拒绝）: {e}") from e
+    # The server resolves LHOST to a SINGLE address via getaddrinfo's
+    # RFC 6724-ordered first result (Rex::Socket.getaddress); on this box
+    # 'localhost' prefers ::1 even though 127.0.0.1 exists → 'IPv6 address
+    # specified for IPv4 payload'. Check the same first result.
+    if infos and infos[0][0] is socket.AF_INET6:
+        raise ValueError(
+            f"LHOST={value!r} 的首选解析地址是 IPv6——多数 payload 的 LHOST 只支持 "
+            "IPv4（如本机 'localhost' 首选 ::1 → 'IPv6 address specified for "
+            "IPv4 payload'）；请改用 IPv4 地址"
+        )
+
+
+#: Substrings that mark a launch-failure line in the msfrpcd log.
+_LAUNCH_FAIL_NEEDLES = (
+    "Exploit failed",
+    "OptionValidateError",
+    "failed to validate",
+    "Handler failed",
+)
+
+
+def _launch_failure_line() -> str:
+    """Newest launch-failure line from the msfrpcd log ('' when none found).
+
+    When module.execute returns job_id=None the module never reached the job
+    table: exploit_simple's rescues print the real reason (option validation
+    error, bad LHOST, bad payload) to the module output and swallow it
+    (return false / nil). The line is written synchronously inside the RPC
+    thread BEFORE the response returns (our RUBYOPT patch flushes every
+    write), so no sleep is needed.
+    """
+    text = _read_log_tail(_MSFRPCD_LOG_FILE)
+    hits = [
+        ln.strip()
+        for ln in text.splitlines()
+        if any(n in ln for n in _LAUNCH_FAIL_NEEDLES)
+    ]
+    return hits[-1] if hits else ""
 
 
 def _execute(client, fullname: str, target: str, opts: dict) -> dict:
@@ -302,9 +456,21 @@ def _execute(client, fullname: str, target: str, opts: dict) -> dict:
         kwargs["PAYLOAD"] = kwargs.pop("Payload")
     # target → RHOST (framework global; harmless for listener modules).
     kwargs.setdefault("RHOST", target)
+    # Auto-fill LHOST for reverse payloads when the user gave an explicit
+    # PAYLOAD but no LHOST — mirrors the choose_payload side effect the
+    # framework applies on the default-payload path (see the LHOST section
+    # above). Without this the payload's required LHOST fails validation
+    # and the RPC returns job_id=None with only a log line to show for it.
+    auto_lhost = None
+    payload = kwargs.get("PAYLOAD")
+    if isinstance(payload, str) and "reverse" in payload.lower() and "LHOST" not in kwargs:
+        auto_lhost = _egress_address(kwargs.get("RHOST", ""))
+        kwargs["LHOST"] = auto_lhost
     result = client.modules.execute(mtype, fullname, **kwargs)
     if not isinstance(result, dict):
         result = {"job_id": None, "uuid": None}
+    if auto_lhost:
+        result["auto_lhost"] = auto_lhost
     return result
 
 
@@ -768,18 +934,38 @@ def _show_opts_report(fullname: str, data: dict) -> str:
 def _run_exploit_report(params: "MsfRunExploitInput", result: dict) -> str:
     job_id = result.get("job_id")
     if job_id is None:
-        return (
+        # job_id=None means exploit_simple bailed before the job was
+        # registered — the real reason is either the RPC error dict
+        # (server-level) or one line in the msfrpcd log (module-level,
+        # filled in by the tool via _launch_failure_line).
+        diag = result.get("launch_error_line") or ""
+        if result.get("error"):
+            diag = (
+                result.get("error_message") or result.get("error_string") or diag
+            )
+        lines = [
             f"## 🎯 Metasploit 执行 — `{params.module}`\n\n"
-            f"❌ msf 拒绝启动该模块（job_id=None）。\n\n"
-            "常见原因：**缺少必填选项**（如 RHOST/Payload）或模块名不存在。\n\n"
-            "💡 用 `msf_show_opts` 查看该模块的必填选项（⚠️ 标记），补齐后重试。"
-        )
+            f"❌ msf 拒绝启动该模块（job_id=None）。\n\n",
+        ]
+        if diag:
+            lines.append(f"**服务端错误:** `{diag}`\n\n")
+        lines += [
+            "常见原因：**必填选项缺失或取值非法**（reverse payload 缺 LHOST、"
+            "LHOST 无法解析、PAYLOAD 不存在）或模块名不存在。\n\n",
+            "💡 用 `msf_show_opts` 查看该模块的必填选项（⚠️ 标记），补齐后重试。",
+        ]
+        return "\n".join(lines)
     lines = [
         f"## 🎯 Metasploit 执行 — `{params.module}`",
         f"**目标:** {params.target}（→ RHOST）",
     ]
     if params.options:
         lines.append(f"**选项:** `{params.options}`")
+    if result.get("auto_lhost"):
+        lines.append(
+            f"**LHOST:** 未指定 → 自动取本机出口地址 `{result['auto_lhost']}`"
+            "（reverse payload 必填，与框架默认 payload 路径行为一致）"
+        )
     lines += [
         f"**Job ID:** {job_id}",
         "",
@@ -968,7 +1154,9 @@ class MsfRunExploitInput(BaseModel):
         description=(
             "Additional module options 'KEY=VALUE,KEY2=VALUE2' "
             "(see msf_show_opts for available keys, e.g. 'Payload=windows/x64/meterpreter/reverse_tcp,LPORT=4444'; "
-            "the payload key accepts both spellings 'Payload' and 'PAYLOAD' — normalized server-side)"
+            "the payload key accepts both spellings 'Payload' and 'PAYLOAD' — normalized client-side. "
+            "LHOST must be a resolvable IPv4 address; for a reverse payload without LHOST it is "
+            "auto-filled with the local egress address)"
         ),
     )
     timeout: int = Field(
@@ -1147,12 +1335,26 @@ async def msf_show_opts(params: MsfShowOptsInput) -> str:
         data = await _rpc(_show_opts, fullname, timeout=30)
     except (MsfConfigError, MsfConnectionError) as e:
         return _error_report("模块选项", e)
-    except (ValueError, TypeError) as e:
-        # 'bool' object is not subscriptable — pymetasploit3's internal
-        # error when the module does not exist (module.info returns False).
+    except LookupError as e:
+        # module.info pre-check found the module does not exist on this
+        # msfrpcd (clean version of the old opaque TypeError).
         return (
             f"## 🎯 Metasploit 模块选项 — `{params.module}`\n\n"
-            f"❌ 加载模块失败: {e}\n\n💡 用 `msf_search` 确认模块名是否存在。"
+            f"❌ {e}\n\n💡 用 `msf_search` 确认模块名（本机 MSF 版本可能没有该模块）。"
+        )
+    except ValueError as e:
+        return (
+            f"## 🎯 Metasploit 模块选项 — `{params.module}`\n\n"
+            f"❌ 参数错误: {e}"
+        )
+    except TypeError as e:
+        # Fallback: 'bool' object is not subscriptable — pymetasploit3's
+        # internal error when the module does not exist and the pre-check
+        # was somehow bypassed.
+        return (
+            f"## 🎯 Metasploit 模块选项 — `{params.module}`\n\n"
+            f"❌ 加载模块失败: {type(e).__name__}: {e}\n\n"
+            "💡 用 `msf_search` 确认模块名是否存在。"
         )
     return _show_opts_report(fullname, data)
 
@@ -1187,6 +1389,10 @@ async def msf_run_exploit(params: MsfRunExploitInput) -> str:
         opts_meta = await _rpc(_show_opts, fullname, timeout=30)
 
         parsed = _parse_options(params.options)
+        if "LHOST" in parsed:
+            # OptAddress mirror — the server would reject these values
+            # inside exploit_simple as job_id=None + one log line.
+            _validate_lhost(str(parsed["LHOST"]))
         unknown = [
             k
             for k in parsed
@@ -1205,12 +1411,31 @@ async def msf_run_exploit(params: MsfRunExploitInput) -> str:
         }
         result = await _rpc(_execute, fullname, params.target, coerced,
                             timeout=params.timeout)
+        if result.get("job_id") is None:
+            # The module never reached the job table; the real reason is
+            # one line in the msfrpcd log (written before the response).
+            result["launch_error_line"] = _launch_failure_line()
     except (MsfConfigError, MsfConnectionError) as e:
         return _error_report("执行", e)
+    except LookupError as e:
+        # module.info pre-check: the module does not exist on this msfrpcd
+        # (clean version of the old opaque 'bool' object TypeError).
+        return (
+            f"## 🎯 Metasploit 执行 — `{params.module}`\n\n"
+            f"❌ {e}\n\n💡 用 `msf_search` 确认模块名（本机 MSF 版本可能没有该模块）。"
+        )
     except ValueError as e:
         return (
             f"## 🎯 Metasploit 执行 — `{params.module}`\n\n"
             f"❌ 参数错误: {e}"
+        )
+    except TypeError as e:
+        # Defense in depth: pymetasploit3 module-object construction can
+        # raise opaque TypeErrors on some server error shapes.
+        return (
+            f"## 🎯 Metasploit 执行 — `{params.module}`\n\n"
+            f"❌ 加载模块失败: {type(e).__name__}: {e}\n\n"
+            "💡 用 `msf_search` 确认模块名是否存在。"
         )
     return _run_exploit_report(params, result)
 

@@ -9,11 +9,20 @@ Covers per the project baseline:
   - report rendering (Chinese markdown, tables, hint lines)
   - async tools with a stubbed msfrpc client (no network, no daemon)
 
-pymetasploit3 ground truth baked in here (live-verified 2026-09-07 on
-Kali 6.5.0 / python3-pymetasploit3 1.0.3+git20250715):
+pymetasploit3 ground truth baked in here (live-verified 2026-09-07/09-10
+on Kali 6.5.0 / python3-pymetasploit3 1.0.3+git20250715):
   - sessions.list keys are native INTS; module.execute returns
-    {'job_id': int|None, 'uuid': str|None} (job_id None = refused, e.g.
-    missing required option); unknown modules raise TypeError internally.
+    {'job_id': int|None, 'uuid': str|None} (job_id None = exploit_simple
+    bailed before the job was registered — the real reason lands in one
+    msfrpcd log line, surfaced via _launch_failure_line).
+  - unknown module: module.info / module.options return the error dict
+    {'error': True, 'error_message': 'Invalid Module'} and the library
+    crashes inside MsfModule.__init__ with the opaque
+    TypeError 'bool' object is not subscriptable; _module_info_raw
+    pre-checks module.info and turns that into a LookupError.
+  - explicit PAYLOAD skips the framework's choose_payload fallback, whose
+    side effect (auto LHOST for reverse payloads) is what makes the
+    no-opts handler work; _execute mirrors it (_egress_address).
 """
 
 from __future__ import annotations
@@ -38,8 +47,11 @@ from kali_mcp.msf import (
     MsfShowOptsInput,
     MsfStopJobInput,
     _coerce_option,
+    _egress_address,
     _execute,
     _job_info,
+    _launch_failure_line,
+    _module_info_raw,
     _jobs_report,
     _kill_session,
     _log_report,
@@ -51,6 +63,7 @@ from kali_mcp.msf import (
     _sessions_report,
     _show_opts_report,
     _split_fullname,
+    _validate_lhost,
     msf_job_info,
     msf_jobs,
     msf_kill_session,
@@ -167,6 +180,20 @@ class FakeClient:
         self.logged_out = 0
 
     def call(self, method, params):
+        if method == "module.info":
+            # mirrors msfrpcd: success dict for known modules, error dict
+            # for missing ones (live-verified shape, 2026-09-10)
+            mtype, mname = params
+            if mname in self.modules_db:
+                info, _ = self.modules_db[mname]
+                return dict(info)
+            return {
+                "error": True,
+                "error_class": "Msf::RPC::Exception",
+                "error_string": "Msf::RPC::Exception",
+                "error_message": "Invalid Module",
+                "error_code": 500,
+            }
         # raw RPC entry point (what MsfSession.stop() uses under the hood)
         self.killed.append((method, list(params)))
         return {"result": "success"}
@@ -192,6 +219,13 @@ class FakeClient:
 
     def logout(self):
         self.logged_out += 1
+
+
+class _BrokenUseClient(FakeClient):
+    """module.info succeeds but modules.use() crashes (old server error shapes)."""
+
+    def _module_for(self, mname):
+        raise TypeError("'bool' object is not subscriptable")
 
 
 HANDLER_OPTS = {
@@ -528,11 +562,47 @@ class TestRunExploitReport:
         assert "127.0.0.1" in out
         assert "msf_jobs" in out
 
+    def test_success_auto_lhost(self):
+        p = MsfRunExploitInput(
+            module="exploit/multi/handler",
+            target="127.0.0.1",
+            options="PAYLOAD=windows/x64/meterpreter/reverse_tcp",
+        )
+        out = _run_exploit_report(
+            p, {"job_id": 5, "uuid": "zz", "auto_lhost": "192.168.0.225"}
+        )
+        assert "自动取本机出口地址" in out
+        assert "192.168.0.225" in out
+
     def test_refused(self):
         p = MsfRunExploitInput(module="exploit/multi/handler", target="127.0.0.1")
         out = _run_exploit_report(p, {"job_id": None, "uuid": None})
         assert "必填选项" in out
         assert "msf_show_opts" in out
+
+    def test_refused_with_log_diag(self):
+        p = MsfRunExploitInput(module="exploit/multi/handler", target="127.0.0.1")
+        out = _run_exploit_report(
+            p,
+            {
+                "job_id": None,
+                "uuid": None,
+                "launch_error_line": (
+                    "[-] Msf::OptionValidateError One or more options failed to "
+                    "validate: LHOST."
+                ),
+            },
+        )
+        assert "OptionValidateError" in out
+        assert "LHOST" in out
+
+    def test_refused_rpc_error_dict(self):
+        p = MsfRunExploitInput(module="exploit/multi/handler", target="127.0.0.1")
+        out = _run_exploit_report(
+            p,
+            {"error": True, "error_message": "Module options must be a Hash"},
+        )
+        assert "Module options must be a Hash" in out
 
 
 class TestJobsReport:
@@ -725,12 +795,24 @@ class TestMsfShowOptsTool:
         assert "exploit/a/x" in out
         assert "auxiliary/a/x" in out
 
-    def test_unknown_module_internal_error(self, stub):
-        # bare name with no search hits but a type prefix that passes the
-        # regex goes straight to use() → library TypeError
+    def test_unknown_module_clean_error(self, stub):
+        # type-prefixed name skips the search; the module.info pre-check
+        # now reports the missing module cleanly (no opaque TypeError)
         _client(stub, modules={})
         out = _run(msf_show_opts(MsfShowOptsInput(module="exploit/no/such/mod")))
+        assert "不存在" in out
+        assert "Invalid Module" in out
+        assert "msf_search" in out
+
+    def test_unknown_module_typeerror_fallback(self, stub):
+        # if the pre-check somehow passes but the library still crashes
+        # inside use(), the TypeError is mapped to a friendly message
+        stub["client"] = _BrokenUseClient(
+            modules={"exploit/no/such/mod": (dict(HANDLER_INFO), dict(HANDLER_OPTS))}
+        )
+        out = _run(msf_show_opts(MsfShowOptsInput(module="exploit/no/such/mod")))
         assert "加载模块失败" in out
+        assert "TypeError" in out
 
 
 class TestMsfRunExploitTool:
@@ -854,6 +936,240 @@ class TestMsfRunExploitTool:
             )
         )
         assert "未找到模块" in out
+
+    def test_missing_module_clean_error(self, stub):
+        # type-prefixed name skips the search; the module.info pre-check
+        # reports the missing module cleanly (the user's ssl_enum case)
+        _client(stub, modules={})
+        out = _run(
+            msf_run_exploit(
+                MsfRunExploitInput(
+                    module="auxiliary/scanner/ssl/ssl_enum", target="127.0.0.1"
+                )
+            )
+        )
+        assert "不存在" in out
+        assert "Invalid Module" in out
+        assert "msf_search" in out
+        assert stub["client"].executed == []
+
+    def test_lhost_malformed_prevalidated(self, stub):
+        _client(stub, modules=self._db())
+        out = _run(
+            msf_run_exploit(
+                MsfRunExploitInput(
+                    module="exploit/multi/handler",
+                    target="127.0.0.1",
+                    options="LHOST=192.168",
+                )
+            )
+        )
+        assert "参数错误" in out
+        assert "192.168" in out
+        assert stub["client"].executed == []  # never launched
+
+    def test_lhost_unresolvable_prevalidated(self, stub):
+        _client(stub, modules=self._db())
+        out = _run(
+            msf_run_exploit(
+                MsfRunExploitInput(
+                    module="exploit/multi/handler",
+                    target="127.0.0.1",
+                    options="LHOST=no-such-host-xyz.invalid",
+                )
+            )
+        )
+        assert "参数错误" in out
+        assert "无法解析" in out
+        assert stub["client"].executed == []  # never launched
+
+    def test_refused_job_surfaces_log_diag(self, stub, monkeypatch, tmp_path):
+        log = tmp_path / "msfrpcd.log"
+        log.write_text(
+            "[-] Msf::OptionValidateError One or more options failed to "
+            "validate: LHOST.\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(msf, "_MSFRPCD_LOG_FILE", str(log))
+        _client(
+            stub,
+            modules=self._db(),
+            execute_result={"job_id": None, "uuid": None},
+        )
+        out = _run(
+            msf_run_exploit(
+                MsfRunExploitInput(module="exploit/multi/handler", target="127.0.0.1")
+            )
+        )
+        assert "OptionValidateError" in out
+        assert "LHOST" in out
+
+    def test_payload_only_reverse_autofills_lhost(self, stub):
+        # the user's V2 case: explicit reverse payload, no LHOST — the
+        # framework would reject it (job_id None); we auto-fill LHOST
+        _client(stub, modules=self._db())
+        out = _run(
+            msf_run_exploit(
+                MsfRunExploitInput(
+                    module="exploit/multi/handler",
+                    target="127.0.0.1",
+                    options="Payload=linux/x64/shell_reverse_tcp",
+                )
+            )
+        )
+        kwargs = stub["client"].executed[0][2]
+        assert kwargs["PAYLOAD"] == "linux/x64/shell_reverse_tcp"
+        assert kwargs["LHOST"]  # auto-filled, non-empty
+        assert "自动取本机出口地址" in out
+
+
+class TestModuleInfoRaw:
+    def test_missing_module_raises_lookup(self, stub):
+        client = _client(stub, modules={})
+        with pytest.raises(LookupError) as ei:
+            _module_info_raw(client, "auxiliary", "auxiliary/scanner/ssl/ssl_enum")
+        assert "不存在" in str(ei.value)
+        assert "Invalid Module" in str(ei.value)
+
+    def test_known_module_returns_info(self, stub):
+        client = _client(
+            stub,
+            modules={"exploit/multi/handler": (dict(HANDLER_INFO), dict(HANDLER_OPTS))},
+        )
+        info = _module_info_raw(client, "exploit", "exploit/multi/handler")
+        assert info.get("fullname") == "exploit/multi/handler"
+
+    def test_non_dict_passthrough(self, stub):
+        client = _client(stub)
+        client.call = lambda m, p: None  # degenerate response
+        assert _module_info_raw(client, "exploit", "exploit/x") == {}
+
+
+class TestLhostValidation:
+    def test_malformed_ipv4_like_rejected(self):
+        for bad in ("192.168", "10.0.0.256", "1.2.3.4.5", "256.1.1.1"):
+            with pytest.raises(ValueError):
+                _validate_lhost(bad)
+
+    def test_empty_rejected(self):
+        with pytest.raises(ValueError):
+            _validate_lhost("")
+
+    def test_unresolvable_rejected(self):
+        with pytest.raises(ValueError):
+            _validate_lhost("no-such-host-xyz.invalid")
+
+    def test_ipv6_only_rejected(self):
+        with pytest.raises(ValueError):
+            _validate_lhost("::1")
+
+    def test_dual_stack_hostname_preferred_ipv6_rejected(self, monkeypatch):
+        # 'localhost' on Kali: both families resolve, but the
+        # RFC 6724-ordered first result is ::1 — the server fails with
+        # 'IPv6 address specified for IPv4 payload' (live-verified)
+        import socket as _socket
+
+        monkeypatch.setattr(
+            _socket,
+            "getaddrinfo",
+            lambda h, p, fam=0, ty=0, pr=0, fl=0: [
+                (_socket.AF_INET6, _socket.SOCK_STREAM, 6, "", ("::1", 0)),
+                (_socket.AF_INET, _socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0)),
+            ],
+        )
+        with pytest.raises(ValueError):
+            _validate_lhost("localhost")
+
+    def test_valid_ipv4_passes(self):
+        _validate_lhost("127.0.0.1")
+        _validate_lhost("192.168.0.77")
+
+    def test_ipv4_hostname_passes(self):
+        _validate_lhost("127.0.0.1")  # numeric, no DNS
+
+
+class TestEgressAddress:
+    def test_loopback_target(self):
+        assert _egress_address("127.0.0.1") == "127.0.0.1"
+
+    def test_unresolvable_fallback(self):
+        assert _egress_address("no-such-host-xyz.invalid") == "0.0.0.0"
+
+    def test_empty_target_never_raises(self):
+        # falls back to some IPv4 string (egress route or 0.0.0.0)
+        addr = _egress_address("")
+        assert isinstance(addr, str) and addr
+
+
+class TestLhostAutofill:
+    def _db(self):
+        return {"exploit/multi/handler": (dict(HANDLER_INFO), dict(HANDLER_OPTS))}
+
+    def test_reverse_payload_no_lhost_autofills(self, stub):
+        client = _client(stub, modules=self._db())
+        result = _execute(
+            client,
+            "exploit/multi/handler",
+            "127.0.0.1",
+            {"PAYLOAD": "windows/x64/meterpreter/reverse_tcp"},
+        )
+        kwargs = client.executed[0][2]
+        assert "LHOST" in kwargs
+        assert result.get("auto_lhost") == kwargs["LHOST"]
+
+    def test_explicit_lhost_kept(self, stub):
+        client = _client(stub, modules=self._db())
+        result = _execute(
+            client,
+            "exploit/multi/handler",
+            "127.0.0.1",
+            {"PAYLOAD": "windows/x64/meterpreter/reverse_tcp", "LHOST": "10.1.2.3"},
+        )
+        kwargs = client.executed[0][2]
+        assert kwargs["LHOST"] == "10.1.2.3"
+        assert "auto_lhost" not in result
+
+    def test_non_reverse_payload_no_autofill(self, stub):
+        client = _client(stub, modules=self._db())
+        result = _execute(
+            client,
+            "exploit/multi/handler",
+            "127.0.0.1",
+            {"PAYLOAD": "windows/x64/meterpreter/bind_tcp"},  # bind, not reverse
+        )
+        kwargs = client.executed[0][2]
+        assert "LHOST" not in kwargs
+        assert "auto_lhost" not in result
+
+    def test_no_payload_no_autofill(self, stub):
+        client = _client(stub, modules=self._db())
+        result = _execute(client, "exploit/multi/handler", "127.0.0.1", {})
+        kwargs = client.executed[0][2]
+        assert "LHOST" not in kwargs
+        assert "auto_lhost" not in result
+
+
+class TestLaunchFailureLine:
+    def test_picks_newest_failure_line(self, monkeypatch, tmp_path):
+        log = tmp_path / "msfrpcd.log"
+        log.write_text(
+            "[-] Exploit failed [bad-config]: Rex::BindFailed\n"
+            "[-] Handler failed to bind to 10.0.0.1:4444\n"
+            "[-] Msf::OptionValidateError One or more options failed to validate: LHOST.\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(msf, "_MSFRPCD_LOG_FILE", str(log))
+        assert _launch_failure_line().endswith("failed to validate: LHOST.")
+
+    def test_missing_file_empty(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(msf, "_MSFRPCD_LOG_FILE", str(tmp_path / "nope.log"))
+        assert _launch_failure_line() == ""
+
+    def test_no_failure_lines_empty(self, monkeypatch, tmp_path):
+        log = tmp_path / "msfrpcd.log"
+        log.write_text("[*] Started reverse TCP handler on 127.0.0.1:4444\n", encoding="utf-8")
+        monkeypatch.setattr(msf, "_MSFRPCD_LOG_FILE", str(log))
+        assert _launch_failure_line() == ""
 
 
 class TestMsfJobsTool:

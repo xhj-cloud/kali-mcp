@@ -5,6 +5,7 @@
 
 | 日期 | 记录 |
 |---|---|
+| 2026-09-10 | [msf_run_exploit 启动失败两类根因（模块不存在报 TypeError / handler 带 PAYLOAD 时 LHOST 失去自动填充 → job_id=None）](2026-09-10-msf_run_exploit启动失败两类根因.md) |
 | 2026-09-10 | [msf_job_info 文档失真 + 完成即移除 → 新增 msf_log（模块输出捕获链路全修复，94→95 工具）](2026-09-10-msf_job_info文档失真与msf_log新增.md) |
 | 2026-09-10 | [msf_run_exploit 混写 `Payload=` 静默落回默认 payload（PAYLOAD 是框架全局选项）](2026-09-10-msf_run_exploit-Payload大小写静默覆盖.md) |
 | 2026-09-09 | [http_request 响应头缺失（401 被显示为"成功"、Set-Cookie 不可见）](2026-09-09-http_request响应头缺失.md) |
