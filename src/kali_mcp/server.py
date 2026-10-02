@@ -36,6 +36,7 @@ except ImportError:
 from fastmcp import FastMCP
 
 # -- Tools --------------------------------------------------------------------
+from kali_mcp.long_tasks import LONG_TASK_TOOLS
 from kali_mcp.tools import TOOL_REGISTRY
 from kali_mcp.monitor import MONITOR_TOOLS
 from kali_mcp.ipv6 import IPV6_TOOLS
@@ -149,6 +150,14 @@ for _name, (_func, _model) in IPV6_TOOLS.items():
     logger.info("Registered ipv6 tool: %s", _name)
 
 logger.info("IPv6 tools: %d registered", len(IPV6_TOOLS))
+
+# Register long-running task management tools (always available; they only
+# manage tasks created by opt-in long-running tools such as hydra_brute)
+for _name, (_func, _model) in LONG_TASK_TOOLS.items():
+    _register_tool_with_model(_name, _func, _model)
+    logger.info("Registered long-task tool: %s", _name)
+
+logger.info("Long-task tools: %d registered", len(LONG_TASK_TOOLS))
 
 # Conditionally register pentest tools
 _pentest_enabled = os.getenv("PENTEST_ENABLED", "").lower() in ("true", "1", "yes")

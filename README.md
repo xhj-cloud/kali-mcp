@@ -1,12 +1,12 @@
 # 🔍 Kali MCP Server
 
-> 将 Kali Linux 变成你的 AI 网络助手 —— 95 个工具，从网络维护到 AD 横向，对话即操作。
-> Turn Kali Linux into your AI network assistant — 95 tools, from network maintenance to AD lateral movement. Talk is the command.
+> 将 Kali Linux 变成你的 AI 网络助手 —— 97 个工具，从网络维护到 AD 横向，对话即操作。
+> Turn Kali Linux into your AI network assistant — 97 tools, from network maintenance to AD lateral movement. Talk is the command.
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
 [![FastMCP](https://img.shields.io/badge/FastMCP-3.4+-green.svg)](https://gofastmcp.com)
 [![License](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightblue.svg)](LICENSE)
-[![Tools](https://img.shields.io/badge/Tools-95-orange.svg)]()
+[![Tools](https://img.shields.io/badge/Tools-97-orange.svg)]()
 
 **[English](#english)** | **[简体中文](#简体中文)**
 
@@ -517,7 +517,7 @@ sudo nmcli connection up "有线连接 1"
 | 34 | `enum4linux_scan` | enum4linux | 🟡 | SMB 用户/共享/OS 枚举 |
 | 35 | `whatweb_scan` | whatweb | 🟡 | Web 技术栈指纹 |
 | 36 | `searchsploit` | searchsploit | 🟡 | Exploit-DB 离线搜索 |
-| 37 | `hydra_brute` | hydra | 🟡 | 服务密码爆破（rdp 模块对 xrdp 易误报，输出自带警告） |
+| 37 | `hydra_brute` | hydra | 🟡 | 服务密码爆破（`sync` 支持 `timeout` 1-3600s；`background` 返回 `job_id`，用 `long_task_status`/`long_task_stop` 查进度/停止；rdp 模块对 xrdp 易误报，输出自带警告） |
 | 38 | `http_load_test` | ab | 🟡 | HTTP 压测（QPS/延迟分位，有上限） |
 | 39 | `nuclei_scan` | nuclei | 🟡 | 模板化漏洞扫描 (3000+ CVE) |
 | 40 | `nuclei_results` | cat | 🟡 | 读取后台 nuclei 扫描结果 |
@@ -576,6 +576,8 @@ sudo nmcli connection up "有线连接 1"
 | 93 | `file_download` | scp + sshpass -e | 🔴 | 目标文件下载到 Kali（拒绝覆盖已存在本地文件） |
 | 94 | `file_read` | 本地读取 | 🔴 | 读 Kali 文件（64KiB 上限，二进制只给 hexdump 头部） |
 | 95 | `file_delete` | 本地删除 | 🔴 | 删 Kali 普通文件（须 confirm=yes，拒目录/符号链接） |
+| 96 | `long_task_status` | 进程内任务表 + 日志文件 | 🟢 | 查询长任务（当前接入 `hydra_brute` 后台模式）状态、退出码、日志路径与最近输出 |
+| 97 | `long_task_stop` | asyncio cancel + SIGTERM | 🟢 | 停止长任务（按 `job_id`，当前接入 `hydra_brute` 后台模式） |
 
 ---
 
@@ -1110,7 +1112,7 @@ sudo nmcli connection up "Wired connection 1"
 
 ---
 
-## Full Tool List (95)
+## Full Tool List (97)
 
 | # | Tool | Kali command | Tier | Function |
 |---|--------|-----------|------|------|
@@ -1150,7 +1152,7 @@ sudo nmcli connection up "Wired connection 1"
 | 34 | `enum4linux_scan` | enum4linux | 🟡 | SMB user/share/OS enumeration |
 | 35 | `whatweb_scan` | whatweb | 🟡 | Web tech-stack fingerprinting |
 | 36 | `searchsploit` | searchsploit | 🟡 | Offline Exploit-DB search |
-| 37 | `hydra_brute` | hydra | 🟡 | Service password brute-force (rdp module false-positives on xrdp — warning included) |
+| 37 | `hydra_brute` | hydra | 🟡 | Service password brute-force (`sync` supports `timeout` 1-3600s; `background` returns `job_id` polled/stopped via `long_task_status`/`long_task_stop`; rdp module false-positives on xrdp — warning included) |
 | 38 | `http_load_test` | ab | 🟡 | HTTP load test (QPS/latency percentiles, capped) |
 | 39 | `nuclei_scan` | nuclei | 🟡 | Template-based vuln scanning (3000+ CVEs) |
 | 40 | `nuclei_results` | cat | 🟡 | Read background nuclei scan results |
@@ -1209,6 +1211,8 @@ sudo nmcli connection up "Wired connection 1"
 | 93 | `file_download` | scp + sshpass -e | 🔴 | Download a target file to Kali (refuses to overwrite an existing local file) |
 | 94 | `file_read` | local read | 🔴 | Read a file on Kali (64 KiB cap, binary → hexdump head only) |
 | 95 | `file_delete` | local delete | 🔴 | Delete a regular file on Kali (requires confirm=yes, refuses dirs/symlinks) |
+| 96 | `long_task_status` | in-process task table + log file | 🟢 | Query long-running task state (currently `hydra_brute` background mode), exit code, log path, and recent output |
+| 97 | `long_task_stop` | asyncio cancel + SIGTERM | 🟢 | Stop a long-running task by `job_id` (currently `hydra_brute` background mode) |
 
 ---
 
