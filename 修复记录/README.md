@@ -5,6 +5,7 @@
 
 | 日期 | 记录 |
 |---|---|
+| 2026-10-02 | [hydra_brute 长任务后台化（sync 限时 1-3600s + background job 模式，95→97 工具，新增 long_task_status/long_task_stop）](2026-10-02-hydra_brute长任务后台化.md) |
 | 2026-09-10 | [msf_run_exploit 启动失败两类根因（模块不存在报 TypeError / handler 带 PAYLOAD 时 LHOST 失去自动填充 → job_id=None）](2026-09-10-msf_run_exploit启动失败两类根因.md) |
 | 2026-09-10 | [msf_job_info 文档失真 + 完成即移除 → 新增 msf_log（模块输出捕获链路全修复，94→95 工具）](2026-09-10-msf_job_info文档失真与msf_log新增.md) |
 | 2026-09-10 | [msf_run_exploit 混写 `Payload=` 静默落回默认 payload（PAYLOAD 是框架全局选项）](2026-09-10-msf_run_exploit-Payload大小写静默覆盖.md) |
